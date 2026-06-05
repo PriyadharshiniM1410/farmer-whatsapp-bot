@@ -1,0 +1,6 @@
+flask
+gspread
+google-auth
+requests
+python-dotenv
+gunicorn
