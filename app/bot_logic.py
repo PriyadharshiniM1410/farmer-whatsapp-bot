@@ -3,20 +3,17 @@ bot_logic.py — Entry point: routes messages to worker or manager modules.
 
 Imports all business logic from:
   app/shared.py   — SESSIONS, constants, sheet helpers
-  app/worker.py   — Worker workflow 
-  app/manager.py  — Manager workflow 
+  app/worker.py   — Worker workflow
+  app/manager.py  — Manager workflow
 """
 
 import re
-from app.shared import SESSIONS, is_manager, PRODUCTS
+from app.shared import SESSIONS, is_manager
+from app.sheets import PRODUCTS
 from app.whatsapp import send_text
 import app.worker as worker
 import app.manager as manager
 
-
-# ══════════════════════════════════════════════════════════════════════════
-#  PUBLIC ENTRY POINTS
-# ══════════════════════════════════════════════════════════════════════════
 
 def handle_message(sender: str, text: str):
     """Route plain-text messages based on role + session mode."""
@@ -27,50 +24,31 @@ def handle_message(sender: str, text: str):
         mode    = session.get("mode", "idle")
         is_mgr  = is_manager(sender)
 
-        # ── Close week command ──
         if t_lower in ("close week", "closeweek", "close_week"):
             manager.handle_close_week_request(sender)
             return
 
-        # ── Mode-specific routing ──
-        # 🌟 USER-FRIENDLY POPUP MODE INTERCEPTION
         if mode == "waiting_for_sold_qty":
-            msg_text = t
             market_id = session.get("current_market")
-            prod_idx = session.get("current_prod_idx")
-            
-            # Safe parsing across dictionary or list configurations
-            item = PRODUCTS[prod_idx]
+            prod_idx  = session.get("current_prod_idx")
+
+            item   = PRODUCTS[prod_idx]
             p_name = item.get("name") if isinstance(item, dict) else str(item)
-            
-            if msg_text.isdigit():
-                sold_val = int(msg_text)
-                
-                # Update data to your spreadsheet
+
+            if t.isdigit():
+                sold_val = int(t)
                 worker.update_sheet_sold_qty(market_id, p_name, sold_val)
                 send_text(sender, f"✅ *{p_name}* → *{sold_val} boxes* saved successfully!")
-                
-                # Clear entry lock state and flash immediately back to the radio selection menu dashboard
                 session["mode"] = "idle"
                 worker.send_product_manifest_dashboard(sender, market_id)
             else:
-                send_text(sender, f"⚠️ Invalid input. Please reply with a valid number only.")
+                send_text(sender, "⚠️ Invalid input. Please reply with a valid number only.")
             return
 
-        if mode == "entry":
-            worker.handle_entry_input(sender, t, session)
-            return
-        if mode == "edit":
-            worker.handle_edit_input(sender, t, session)
-            return
-        if mode == "overwrite_confirm":
-            worker.handle_overwrite_text(sender, t_lower, session)
-            return
         if mode == "close_confirm":
             manager.handle_close_confirm_text(sender, t_lower)
             return
 
-        # Manager modes
         if is_mgr and mode == "mgr_market_edit":
             manager.handle_mgr_edit_input(sender, t, session)
             return
@@ -78,7 +56,6 @@ def handle_message(sender: str, text: str):
             manager.handle_mgr_edit_overwrite_text(sender, t_lower, session)
             return
 
-        # ── Greeting ──
         if any(w in t_lower for w in ("hi", "hello", "menu", "start", "help")):
             if is_mgr:
                 manager.send_manager_menu(sender)
@@ -86,20 +63,17 @@ def handle_message(sender: str, text: str):
                 worker.route_on_greeting(sender, session)
             return
 
-        # ── Direct market code: "M3" ──
         if re.match(r"^m\d{1,2}$", t_lower):
             mid = t_lower.upper()
             if is_mgr:
                 manager.send_market_review(sender, mid)
             else:
-                # 🌟 Open the new list dashboard instantly on typing direct code
                 worker.send_product_manifest_dashboard(sender, mid)
             return
 
-        # ── Manager: numeric product selection in product summary ──
         if is_mgr and mode == "mgr_product_select" and t.isdigit():
             idx = int(t) - 1
-            if 0 <= idx < len(SESSIONS):  # bounds checked inside send_product_summary
+            if 0 <= idx < len(SESSIONS):
                 manager.send_product_summary(sender, idx)
                 return
 
@@ -114,27 +88,14 @@ def handle_message(sender: str, text: str):
 
 
 def handle_interactive(sender: str, button_id: str):
-    """Intercept clicks from WhatsApp buttons and native list popup radio rows."""
+    """Intercept clicks from WhatsApp buttons and list popup rows."""
     try:
         session = SESSIONS.get(sender, {})
         is_mgr  = is_manager(sender)
 
-        # ── Shared navigation ──
         if button_id == "menu":
             if is_mgr:
                 manager.send_manager_menu(sender)
-            else:
-                worker.route_on_greeting(sender, session)
-            return
-
-        if button_id in ("day_monday", "day_wednesday", "day_friday"):
-            if is_mgr:
-                day_map = {
-                    "day_monday":    "Monday",
-                    "day_wednesday": "Wednesday",
-                    "day_friday":    "Friday"
-                }
-                worker.send_day_list(sender, day_map[button_id])
             else:
                 worker.route_on_greeting(sender, session)
             return
@@ -144,33 +105,29 @@ def handle_interactive(sender: str, button_id: str):
             worker.send_allocation_view(sender, mid)
             return
 
-        # 🌟 USER-FRIENDLY POPUP RADIO BUTTON OPTION CLICK SELECTION
         if button_id.startswith("ep_"):
-            # Short format pattern: ep_{market_id}_{product_index}
-            parts = button_id.split("_")
+            parts     = button_id.split("_")
             market_id = parts[1]
-            prod_idx = int(parts[2])
-            
-            item = PRODUCTS[prod_idx]
-            p_name = item.get("name") if isinstance(item, dict) else str(item)
-            p_emoji = item.get("emoji", "📦") if isinstance(item, dict) else "📦"
-            
-            # Fetch active market data snapshots safely via standard modules
-            all_data = worker.get_all_sheet_data()
-            allocs = worker.get_market_allocations(market_id, all_data)
-            sold_data = worker.get_sold_data(market_id, all_data)
-            
-            allocated = allocs.get(p_name, 0)
-            current_sold = sold_data.get(p_name)
-            sold_str = f"{int(float(current_sold))}" if current_sold is not None and current_sold != "" else "None"
+            prod_idx  = int(parts[2])
 
-            # Route input capture state locks
+            item    = PRODUCTS[prod_idx]
+            p_name  = item.get("name") if isinstance(item, dict) else str(item)
+            p_emoji = item.get("emoji", "📦") if isinstance(item, dict) else "📦"
+
+            all_data    = worker.get_all_sheet_data()
+            allocs      = worker.get_market_allocations(market_id, all_data)
+            sold_data   = worker.get_sold_data(market_id, all_data)
+
+            allocated    = allocs.get(p_name, 0)
+            current_sold = sold_data.get(p_name)
+            sold_str     = f"{int(float(current_sold))}" if current_sold is not None and current_sold != "" else "None"
+
             SESSIONS[sender] = {
-                "mode": "waiting_for_sold_qty",
-                "current_market": market_id,
+                "mode":            "waiting_for_sold_qty",
+                "current_market":  market_id,
                 "current_prod_idx": prod_idx,
-                "worker": session.get("worker"),
-                "name": session.get("name")
+                "worker":          session.get("worker"),
+                "name":            session.get("name"),
             }
 
             send_text(sender,
@@ -184,7 +141,6 @@ def handle_interactive(sender: str, button_id: str):
             )
             return
 
-        # ── Manager Buttons ──
         if is_mgr:
             if button_id == "mgr_dashboard":
                 manager.send_dashboard(sender)
@@ -222,16 +178,13 @@ def handle_interactive(sender: str, button_id: str):
                 manager.send_manager_menu(sender)
             return
 
-        # ── Worker Buttons ──
         if button_id.startswith("market_"):
             mid = button_id.replace("market_", "").upper()
             worker.send_product_manifest_dashboard(sender, mid)
             return
-            
         elif button_id == "finish_market":
             worker.complete_market(sender, session)
         elif button_id.startswith("submit_lock_"):
-            mid = button_id.replace("submit_lock_", "").upper()
             worker.complete_market(sender, session)
         elif button_id == "close_confirm_yes":
             manager.do_close_week(sender)
