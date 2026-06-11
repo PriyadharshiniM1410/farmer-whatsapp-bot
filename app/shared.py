@@ -12,7 +12,7 @@ from app.sheets import (
 )
 
 # ─── Config ────────────────────────────────────────────────────────────────
-MANAGER_NUMBERS = {"919876543210"}   # Add more: "91XXXXXXXXXX"
+MANAGER_NUMBERS = {"918825877427"}   # Add more: "91XXXXXXXXXX"
 
 # ─── Session store ─────────────────────────────────────────────────────────
 # Shared keys (both roles):
