@@ -1,5 +1,5 @@
 
-
+'manager.py'
 from app.sheets import (
     get_all_sheet_data,
     get_market_allocations, get_markets_by_day, get_sold_data,
@@ -8,10 +8,11 @@ from app.sheets import (
     MARKETS, PRODUCTS,
 )
 from app.whatsapp import send_text, send_buttons, send_list
-from app.shared import (
-    SESSIONS, MANAGER_NUMBERS, PRODUCT_EMOJIS, DAY_ICONS, DAYS_ORDER,
-)
 
+from app.shared import (
+    SESSIONS, is_manager, PRODUCT_EMOJIS, DAY_ICONS, DAYS_ORDER,
+    get_manager_numbers_set
+)
 
 # ── M-1: Manager Menu ──────────────────────────────────────────────────────
 
@@ -495,7 +496,7 @@ def notify_all_complete(sender: str):
 # ── M-10–12: Close Week ────────────────────────────────────────────────────
 
 def handle_close_week_request(sender: str):
-    if sender not in MANAGER_NUMBERS:
+    if sender not in get_manager_numbers_set():
         send_text(sender, "🔒 Only the manager can close the week.")
         return
 
@@ -541,7 +542,7 @@ def handle_close_confirm_text(sender: str, text: str):
 
 
 def do_close_week(sender: str):
-    if sender not in MANAGER_NUMBERS:
+    if sender not in get_manager_numbers_set():
         send_text(sender, "🔒 Access denied.")
         return
 
