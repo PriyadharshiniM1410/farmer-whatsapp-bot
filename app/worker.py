@@ -1,34 +1,27 @@
 """
-worker.py — Ultra User-Friendly Popup-Driven Worker Workflow
-============================================================
-Updates: Integrated optimized list item generation tracking IDs.
+worker.py — Worker workflow: greeting, dashboard, data entry, and market lock.
 """
 
 from app.sheets import (
     get_market_allocations, write_sold_box,
-    all_markets_complete, is_day_complete,
-    get_workers_by_day, get_manager_numbers,
+    all_markets_complete,
+    get_manager_numbers,
     get_worker_by_phone, get_sold_data,
     get_all_sheet_data, get_reallocation_view,
     MARKETS, PRODUCTS,
 )
 from app.whatsapp import send_text, send_buttons, send_list
-from app.shared import (
-    SESSIONS, is_manager, PRODUCT_EMOJIS, DAY_ICONS,
-)
+from app.shared import SESSIONS, is_manager, PRODUCT_EMOJIS, DAY_ICONS
 
 COMPLETED_MARKETS: dict = {}
 DAY_ORDER = ["Monday", "Wednesday", "Friday"]
 
 
-# ══════════════════════════════════════════════════════
-# HELPER — Dynamic Sheet Updates
-# ══════════════════════════════════════════════════════
+# ── Helper ────────────────────────────────────────────────────────────────
 
 def update_sheet_sold_qty(market_id: str, product_name: str, sold_val: int):
-    """Bridge function to write input values dynamically into Google Sheets matching index."""
+    """Write sold quantity to Google Sheets for the given product."""
     try:
-        # Resolve tracking matches gracefully across list properties
         for idx, item in enumerate(PRODUCTS):
             p_str = item.get("name") if isinstance(item, dict) else str(item)
             if p_str == product_name:
@@ -39,18 +32,16 @@ def update_sheet_sold_qty(market_id: str, product_name: str, sold_val: int):
         raise exc
 
 
-# ══════════════════════════════════════════════════════
-# STEP 1 — Greeting & Main Menu
-# ══════════════════════════════════════════════════════
+# ── Step 1: Greeting & main menu ──────────────────────────────────────────
 
 def route_on_greeting(sender: str, session: dict):
-    """Identify worker → show assigned markets with a dynamic View button for each."""
+    """Identify worker and show assigned markets."""
     worker = get_worker_by_phone(sender)
     if not worker:
         send_text(sender, "⚠️ Your number is not registered.\nPlease contact your manager.")
         return
 
-    name = worker.get("name", "Worker")
+    name     = worker.get("name", "Worker")
     assigned = []
     for day in DAY_ORDER:
         mid = worker.get(day, "-")
@@ -64,40 +55,36 @@ def route_on_greeting(sender: str, session: dict):
     all_data = get_all_sheet_data()
     SESSIONS[sender] = {"mode": "idle", "worker": worker, "name": name}
 
-    icon_map = {"Monday": "🟦", "Wednesday": "🟧", "Friday": "🟥"}
-    status_lines = []
+    icon_map       = {"Monday": "🟦", "Wednesday": "🟧", "Friday": "🟥"}
+    status_lines   = []
     allocation_rows = []
-    market_rows = []
+    market_rows    = []
 
     for a in assigned:
-        mid = a["market_id"]
-        day = a["day"]
+        mid  = a["market_id"]
+        day  = a["day"]
         icon = icon_map.get(day, "📦")
 
-        # Status check
-        sold = get_sold_data(mid, all_data)
-        filled = sum(1 for v in sold.values() if v is not None and v != "")
+        sold    = get_sold_data(mid, all_data)
+        filled  = sum(1 for v in sold.values() if v is not None and v != "")
         is_locked = mid in COMPLETED_MARKETS.get(sender, set())
-        status = "✅ Complete" if (is_locked or filled == len(PRODUCTS)) else "⬜ Not started"
-        
+        status  = "✅ Complete" if (is_locked or filled == len(PRODUCTS)) else "⬜ Not started"
+
         status_lines.append(f"{icon} *{mid}* — {day} | {status}")
-        
-        # Add a specific Allocation button for THIS market
         allocation_rows.append({
-            "id": f"view_realloc_{mid}",
-            "title": f"📦 View {mid} Allocation",
-            "description": f"Check remaining stock for {mid}"
+            "id":          f"view_realloc_{mid}",
+            "title":       f"📦 View {mid} Allocation",
+            "description": f"Check remaining stock for {mid}",
         })
-        
         market_rows.append({
-            "id": f"market_{mid}",
-            "title": f"Open {mid}",
-            "description": f"View/Enter entries for {day}"
+            "id":          f"market_{mid}",
+            "title":       f"Open {mid}",
+            "description": f"View/Enter entries for {day}",
         })
 
     sections_payload = [
-        {"title": "Allocation Splits", "rows": allocation_rows},
-        {"title": "Market Schedule", "rows": market_rows}
+        {"title": "Allocation Splits",  "rows": allocation_rows},
+        {"title": "Market Schedule",    "rows": market_rows},
     ]
 
     body_text = (
@@ -105,23 +92,23 @@ def route_on_greeting(sender: str, session: dict):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👋 Hello *{name}*!\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        + "\n".join(status_lines) +
-        f"\n━━━━━━━━━━━━━━━━━━━━\n"
+        + "\n".join(status_lines)
+        + f"\n━━━━━━━━━━━━━━━━━━━━\n"
         f"👇 Select an option to view or enter data:"
     )
-    
+
     send_list(
         to=sender,
         body=body_text,
         button_label="Select Option",
-        sections=sections_payload
+        sections=sections_payload,
     )
-# ══════════════════════════════════════════════════════
-# STEP 2 — Unified Interactive Matrix Dashboard
-# ══════════════════════════════════════════════════════
+
+
+# ── Step 2: Sales dashboard ───────────────────────────────────────────────
 
 def send_product_manifest_dashboard(sender: str, market_id: str):
-    """Unified User-Friendly Dashboard using clean short tracking row keys."""
+    """Show the product sales dashboard for a market."""
     if market_id in COMPLETED_MARKETS.get(sender, set()):
         send_text(sender,
             f"🔒 *{market_id} is locked.*\n"
@@ -131,36 +118,33 @@ def send_product_manifest_dashboard(sender: str, market_id: str):
         return
 
     try:
-        all_data = get_all_sheet_data(force=True)
-        allocs = get_market_allocations(market_id, all_data)
+        all_data  = get_all_sheet_data(force=True)
+        allocs    = get_market_allocations(market_id, all_data)
         sold_data = get_sold_data(market_id, all_data)
     except Exception as exc:
         send_text(sender, f"❌ Error loading dashboard metrics: {exc}")
         return
 
     icon_map = {"Monday": "🟦", "Wednesday": "🟧", "Friday": "🟥"}
-    day = MARKETS.get(market_id, "Market")
+    day      = MARKETS.get(market_id, "Market")
     day_icon = icon_map.get(day, "📦")
 
-    product_rows = []
-    filled_count = 0
+    product_rows    = []
+    filled_count    = 0
     total_allocated = 0
-    total_sold = 0
+    total_sold      = 0
 
     for idx, item in enumerate(PRODUCTS):
         if isinstance(item, dict):
-            p_name = item.get("name", f"Product {idx+1}")
+            p_name  = item.get("name", f"Product {idx + 1}")
             p_emoji = item.get("emoji", "📦")
         else:
-            p_name = str(item)
-            try:
-                p_emoji = PRODUCT_EMOJIS[idx]
-            except IndexError:
-                p_emoji = "📦"
-        
-        allocated = allocs.get(p_name, 0) if isinstance(allocs, dict) else 0
+            p_name  = str(item)
+            p_emoji = PRODUCT_EMOJIS[idx] if idx < len(PRODUCT_EMOJIS) else "📦"
+
+        allocated    = allocs.get(p_name, 0) if isinstance(allocs, dict) else 0
         current_sold = sold_data.get(p_name, None) if isinstance(sold_data, dict) else None
-        
+
         total_allocated += allocated
 
         if current_sold is not None and current_sold != "":
@@ -173,19 +157,17 @@ def send_product_manifest_dashboard(sender: str, market_id: str):
         else:
             status_tag = "⬜ Pending Entry"
 
-        # 🚀 UNIQUE SHORT-ID PREVENTING CHARACTER LIMIT DROP ISSUES
         product_rows.append({
-            "id": f"ep_{market_id}_{idx}",
-            "title": f"{p_emoji} {p_name}",
-            "description": f"Alloc: {allocated:.0f} | {status_tag}"
+            "id":          f"ep_{market_id}_{idx}",
+            "title":       f"{p_emoji} {p_name}",
+            "description": f"Alloc: {allocated:.0f} | {status_tag}",
         })
 
-    # Save active market index parameters to user session context
     session = SESSIONS.get(sender, {})
     SESSIONS[sender] = {
         **session,
-        "market_id": market_id,
-        "current_market": market_id
+        "market_id":      market_id,
+        "current_market": market_id,
     }
 
     sell_thru = (total_sold / total_allocated * 100) if total_allocated > 0 else 0
@@ -201,29 +183,22 @@ def send_product_manifest_dashboard(sender: str, market_id: str):
         f"👇 Tap below to select any product to enter or edit its numbers directly:"
     )
 
-    sections_payload = [{
-        "title": "Select Product",  # ✨ FIXED: Shortened from "Select Product to Edit/Enter" (<= 24 chars)
-        "rows": product_rows
-    }]
-
     send_list(
         to=sender,
         body=body_text,
-        button_label="Select Product",  # ✨ FIXED: Plain text string to stay under the 20 character maximum
-        sections=sections_payload
+        button_label="Select Product",
+        sections=[{"title": "Select Product", "rows": product_rows}],
     )
 
     if filled_count == len(PRODUCTS):
         send_buttons(
             to=sender,
             body="✅ All products are completely filled out! If everything looks correct, submit your final sheet lock.",
-            buttons=[{"id": f"submit_lock_{market_id}", "title": "🔒 Submit & Lock Market"}]
+            buttons=[{"id": f"submit_lock_{market_id}", "title": "🔒 Submit & Lock Market"}],
         )
 
 
-# ══════════════════════════════════════════════════════
-# STEP 3 — Lock and Finalize
-# ══════════════════════════════════════════════════════
+# ── Step 3: Lock and finalize ─────────────────────────────────────────────
 
 def complete_market(sender: str, session: dict):
     market_id = session.get("current_market") or session.get("market_id")
@@ -248,20 +223,19 @@ def complete_market(sender: str, session: dict):
         f"━━━━━━━━━━━━━━━━━━━━"
     ]
     for i, item in enumerate(PRODUCTS):
-        prod = item.get("name") if isinstance(item, dict) else str(item)
+        prod  = item.get("name") if isinstance(item, dict) else str(item)
         emoji = item.get("emoji", "📦") if isinstance(item, dict) else PRODUCT_EMOJIS[i]
-        
-        alloc    = allocs.get(prod, 0)
-        sold     = sold_data.get(prod)
+        alloc = allocs.get(prod, 0)
+        sold  = sold_data.get(prod)
         sold_str = f"✅ {sold:.0f}" if sold is not None and sold != "" else "⬜ --"
-        lines.append(f"{i+1:>2} │ {emoji}{prod:<10} │{alloc:>4.0f} │{sold_str}")
+        lines.append(f"{i + 1:>2} │ {emoji}{prod:<10} │{alloc:>4.0f} │{sold_str}")
 
-    lines.append(f"━━━━━━━━━━━━━━━━━━━━\n✅ Data saved and locked to Google Sheets!")
+    lines.append("━━━━━━━━━━━━━━━━━━━━\n✅ Data saved and locked to Google Sheets!")
     send_text(sender, "\n".join(lines))
 
     send_buttons(sender,
         "━━━━━━━━━━━━━━━━━━━━",
-        [{"id": f"view_realloc_{market_id}", "title": "📦 View Allocation"}]
+        [{"id": f"view_realloc_{market_id}", "title": "📦 View Allocation"}],
     )
 
     try:
@@ -273,9 +247,7 @@ def complete_market(sender: str, session: dict):
         print(f"All complete check error: {exc}")
 
 
-# ══════════════════════════════════════════════════════
-# STEP 4 — Formula Based Allocation Split View
-# ══════════════════════════════════════════════════════
+# ── Step 4: Allocation split view ─────────────────────────────────────────
 
 def send_allocation_view(sender: str, market_id: str):
     day      = MARKETS.get(market_id, "")
@@ -304,9 +276,9 @@ def send_allocation_view(sender: str, market_id: str):
         send_text(sender,
             f"{icon} *{day} — Allocation Status*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ {market_id} — Complete\n" +
-            "\n".join(f"⏳ {mid} — Pending" for mid in pending) +
-            f"\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ {market_id} — Complete\n"
+            + "\n".join(f"⏳ {mid} — Pending" for mid in pending)
+            + f"\n━━━━━━━━━━━━━━━━━━━━\n"
             f"⚠️ *{pending_str}* not finished yet.\n"
             f"Allocation view available once all {day} markets are complete."
         )
@@ -319,7 +291,6 @@ def send_allocation_view(sender: str, market_id: str):
         return
 
     next_markets = [mid for mid, d in MARKETS.items() if d == next_day]
-    # Enhanced header
     header = (
         f"{icon} *{market_id} — REALLOCATION PLAN*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -329,36 +300,30 @@ def send_allocation_view(sender: str, market_id: str):
 
     table_lines = []
     for r in rows:
-        prod_emoji = r['emoji']
-        prod_name  = r['product']
-        remain_qty = r['remain']
-        
+        prod_emoji = r["emoji"]
+        prod_name  = r["product"]
+        remain_qty = r["remain"]
+
         if remain_qty > 0:
-            # Create a clean line for the product header
             table_lines.append(f"{prod_emoji} *{prod_name:<8}* | {remain_qty:.0f} | 👇")
-            
-            # Sub-rows for each market split
-            total_next_alloc = sum(r['next_day_allocs'].get(m, 0) for m in next_markets)
+            total_next_alloc  = sum(r["next_day_allocs"].get(m, 0) for m in next_markets)
             accumulated_split = 0
-            
             for idx, m in enumerate(next_markets):
-                next_alloc = r['next_day_allocs'].get(m, 0)
+                next_alloc = r["next_day_allocs"].get(m, 0)
                 if total_next_alloc > 0 and next_alloc > 0:
                     if idx == len(next_markets) - 1:
                         exact_split = remain_qty - accumulated_split
                     else:
                         exact_split = round((next_alloc / total_next_alloc) * remain_qty)
                         accumulated_split += exact_split
-                    
                     if exact_split > 0:
-                        # Clean split line
                         table_lines.append(f"   └─ {m}: *{exact_split:.0f} boxes*")
-            table_lines.append("") # Empty line for spacing
+            table_lines.append("")
         else:
             table_lines.append(f"{prod_emoji} *{prod_name:<8}* | 0   | ✅")
 
-    # Send the final polished message
-    send_text(sender, header + "\n".join(table_lines) + 
-              f"━━━━━━━━━━━━━━━━━━━━\n🚛 *Load your truck as per the plan above!*")
-
+    send_text(sender,
+        header + "\n".join(table_lines)
+        + "━━━━━━━━━━━━━━━━━━━━\n🚛 *Load your truck as per the plan above!*"
+    )
     send_buttons(sender, "━━━━━━━━━━━━━━━━━━━━", [{"id": "menu", "title": "🏠 Main Menu"}])
