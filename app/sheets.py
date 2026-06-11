@@ -66,9 +66,16 @@ WORKER_CACHE_TTL = 60
 
 
 # ── Connection ────────────────────────────────────────────────────────────
-
 def _client():
-    creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+    if creds_json:
+        # Koyeb cloud-ல run ஆகும்போது
+        import json
+        creds_dict = json.loads(creds_json)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    else:
+        # உங்கள் laptop-ல locally run ஆகும்போது
+        creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
     return gspread.authorize(creds)
 
 def _spreadsheet():
