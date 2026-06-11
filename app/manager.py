@@ -1,5 +1,3 @@
-
-'manager.py'
 from app.sheets import (
     get_all_sheet_data,
     get_market_allocations, get_markets_by_day, get_sold_data,
@@ -8,11 +6,11 @@ from app.sheets import (
     MARKETS, PRODUCTS,
 )
 from app.whatsapp import send_text, send_buttons, send_list
-
 from app.shared import (
     SESSIONS, is_manager, PRODUCT_EMOJIS, DAY_ICONS, DAYS_ORDER,
-    get_manager_numbers_set
+    get_manager_numbers_set,
 )
+
 
 # ── M-1: Manager Menu ──────────────────────────────────────────────────────
 
@@ -21,121 +19,26 @@ def send_manager_menu(sender: str):
     send_buttons(sender,
         "👋 *Welcome, Manager!*\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🌾 *AGR0 MARKET — Operations Dashboard*\n"
+        "🌾 *AGRO MARKET — Operations*\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "What would you like to do?",
         [
-            {"id": "mgr_dashboard",      "title": "📊  Dashboard"},
-            {"id": "mgr_market_status",  "title": "📋  Market Status"},
-            {"id": "mgr_sales_summary",  "title": "📈  Sales Summary"},
-        ]
-    )
-    send_buttons(sender, "━━━━━━━━━━━━━━━━━━━━",
-        [
+            {"id": "mgr_dashboard",       "title": "📊  Overview"},
             {"id": "mgr_product_summary", "title": "🔍  Product Summary"},
             {"id": "mgr_close_week",      "title": "🔄  Close Week"},
         ]
     )
 
 
-# ── M-2: Dashboard ─────────────────────────────────────────────────────────
+# ── M-2: Combined Overview (Dashboard + Market Status + Sales Summary) ─────
 
 def send_dashboard(sender: str):
-    """ONE sheet read for the entire dashboard."""
+    """ONE sheet read → shows everything: sales totals + day-wise status + market grid."""
     SESSIONS[sender] = {"mode": "idle"}
     try:
-        all_data   = get_all_sheet_data()                          # ← single read
-        status_map = build_market_status_map(all_data)             # uses cached data
-    except Exception as exc:
-        send_text(sender, f"❌ Error reading sheet: {exc}")
-        return
-
-    completed = sum(1 for s in status_map.values() if s == "complete")
-    in_prog   = sum(1 for s in status_map.values() if s == "in_progress")
-    pending   = sum(1 for s in status_map.values() if s == "not_started")
-
-    lines = ["📊 *CURRENT WEEK DASHBOARD*\n━━━━━━━━━━━━━━━━━━━━"]
-    for day in DAYS_ORDER:
-        icon     = DAY_ICONS[day]
-        day_mkts = get_markets_by_day(day)
-        lines.append(f"\n{icon} *{day}*")
-        for m in day_mkts:
-            dot = {"complete": "✅", "in_progress": "🟡", "not_started": "❌"}[
-                status_map.get(m["id"], "not_started")]
-            lines.append(f"  {dot} {m['id']}")
-
-    lines.append(
-        f"\n━━━━━━━━━━━━━━━━━━━━\n"
-        f"✅ Completed  : *{completed}/12*\n"
-        f"🟡 In Progress: *{in_prog}/12*\n"
-        f"❌ Not Started: *{pending}/12*"
-    )
-    send_text(sender, "\n".join(lines))
-    send_buttons(sender, "━━━━━━━━━━━━━━━━━━━━\nView details:",
-        [
-            {"id": "mgr_market_status", "title": "📋  Market Status"},
-            {"id": "mgr_sales_summary", "title": "📈  Sales Summary"},
-            {"id": "menu",              "title": "🏠  Main Menu"},
-        ]
-    )
-
-
-# ── M-3: Market Detail ─────────────────────────────────────────────────────
-
-def send_market_detail_status(sender: str, market_id: str):
-    """ONE sheet read for this market's detail."""
-    try:
-        all_data  = get_all_sheet_data()                           # ← single read
-        allocs    = get_market_allocations(market_id, all_data)
-        sold_data = get_sold_data(market_id, all_data)
-    except Exception as exc:
-        send_text(sender, f"❌ Error reading sheet: {exc}")
-        return
-
-    day    = MARKETS.get(market_id, "")
-    icon   = DAY_ICONS.get(day, "📦")
-    filled = [(p, sold_data[p]) for p in PRODUCTS if sold_data.get(p) is not None]
-    empty  = [p for p in PRODUCTS if sold_data.get(p) is None]
-
-    status_label = (
-        "✅ Completed" if not empty
-        else ("🟡 In Progress" if filled else "❌ Not Started")
-    )
-    completed_lines = "\n".join(
-        f"  {PRODUCT_EMOJIS[PRODUCTS.index(p)]} {p:<12} {v:.0f}"
-        for p, v in filled
-    ) or "  (none)"
-    pending_lines = "\n".join(
-        f"  {PRODUCT_EMOJIS[PRODUCTS.index(p)]} {p}" for p in empty
-    ) or "  (all complete)"
-
-    send_text(sender,
-        f"{icon} *Market {market_id} | {day.upper()}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Status: *{status_label}*\n"
-        f"Completed: *{len(filled)}/{len(PRODUCTS)} products*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*✅ Completed Products:*\n{completed_lines}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*⏳ Pending Products:*\n{pending_lines}"
-    )
-    send_buttons(sender, f"Actions for *{market_id}*:",
-        [
-            {"id": f"mgr_view_market_{market_id}", "title": "📄  Full Data View"},
-            {"id": f"mgr_edit_market_{market_id}", "title": "✏️  Edit Market"},
-            {"id": "mgr_market_status",            "title": "◀  Market Status"},
-        ]
-    )
-
-
-# ── M-4: Live Sales Summary ────────────────────────────────────────────────
-
-def send_sales_summary(sender: str):
-    """ONE sheet read for full sales summary."""
-    SESSIONS[sender] = {"mode": "idle"}
-    try:
-        all_data = get_all_sheet_data()                            # ← single read
-        totals   = compute_week_totals(all_data)
+        all_data   = get_all_sheet_data()
+        status_map = build_market_status_map(all_data)
+        totals     = compute_week_totals(all_data)
     except Exception as exc:
         send_text(sender, f"❌ Error reading sheet: {exc}")
         return
@@ -145,48 +48,140 @@ def send_sales_summary(sender: str):
     unsold      = total_alloc - total_sold
     sell_thru   = (total_sold / total_alloc * 100) if total_alloc > 0 else 0
 
-    send_text(sender,
-        "📈 *LIVE SALES SUMMARY*\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📦 Total Allocated : *{total_alloc:,.0f} boxes*\n"
-        f"💰 Total Sold      : *{total_sold:,.0f} boxes*\n"
-        f"📊 Sell-Through    : *{sell_thru:.2f}%*\n"
-        f"🔴 Unsold          : *{unsold:,.0f} boxes*\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "🕐 Live from Google Sheets"
-    )
+    completed = sum(1 for s in status_map.values() if s == "complete")
+    in_prog   = sum(1 for s in status_map.values() if s == "in_progress")
+    pending   = sum(1 for s in status_map.values() if s == "not_started")
 
-    # Day-wise using same all_data — ZERO extra API calls
-    day_lines = ["*Day-wise Breakdown:*"]
+    # ── Section 1: Sales totals ──
+    lines = [
+        "📊 *WEEKLY OVERVIEW*",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📦 Allocated  : *{total_alloc:,.0f} boxes*",
+        f"💰 Sold       : *{total_sold:,.0f} boxes*",
+        f"🔴 Unsold     : *{unsold:,.0f} boxes*",
+        f"📈 Sell-thru  : *{sell_thru:.1f}%*",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"✅ Complete   : *{completed}/12*",
+        f"🟡 In Progress: *{in_prog}/12*",
+        f"❌ Not Started: *{pending}/12*",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    # ── Section 2: Day-wise breakdown + market grid ──
     for day in DAYS_ORDER:
         icon     = DAY_ICONS[day]
         day_mkts = get_markets_by_day(day)
-        d_alloc  = d_sold = 0.0
+
+        # Day totals
+        d_alloc = d_sold = 0.0
         for m in day_mkts:
             allocs    = get_market_allocations(m["id"], all_data)
             sold_data = get_sold_data(m["id"], all_data)
             d_alloc  += sum(allocs.values())
             d_sold   += sum(v for v in sold_data.values() if v is not None)
         d_pct = (d_sold / d_alloc * 100) if d_alloc > 0 else 0
-        day_lines.append(f"{icon} {day}: {d_sold:,.0f}/{d_alloc:,.0f} ({d_pct:.1f}%)")
 
-    send_text(sender, "\n".join(day_lines))
-    send_buttons(sender, "━━━━━━━━━━━━━━━━━━━━",
+        lines.append(f"{icon} *{day}*  {d_sold:,.0f}/{d_alloc:,.0f} ({d_pct:.0f}%)")
+
+        # Market grid per day
+        for m in day_mkts:
+            mid    = m["id"]
+            status = status_map.get(mid, "not_started")
+            dot    = {"complete": "✅", "in_progress": "🟡", "not_started": "❌"}[status]
+            filled = count_filled(mid, all_data)
+            lines.append(f"  {dot} {mid}  ({filled}/{len(PRODUCTS)})")
+
+    send_text(sender, "\n".join(lines))
+
+    # ── Tap market to view/edit ──
+    sections = []
+    for day in DAYS_ORDER:
+        icon     = DAY_ICONS[day]
+        day_mkts = get_markets_by_day(day)
+        rows = []
+        for m in day_mkts:
+            mid    = m["id"]
+            status = status_map.get(mid, "not_started")
+            dot    = {"complete": "✅", "in_progress": "🟡", "not_started": "❌"}[status]
+            filled = count_filled(mid, all_data)
+            rows.append({
+                "id":          f"mgr_view_market_{mid}",
+                "title":       f"{dot} {mid}",
+                "description": f"{filled}/{len(PRODUCTS)} products — Tap to view/edit",
+            })
+        sections.append({"title": f"{icon} {day}", "rows": rows})
+
+    send_list(sender, "Tap a market to view details:", "Select Market", sections)
+
+
+# ── M-3: Market Review ─────────────────────────────────────────────────────
+
+def send_market_review(sender: str, market_id: str):
+    """ONE sheet read → full market data with edit option."""
+    try:
+        all_data  = get_all_sheet_data()
+        allocs    = get_market_allocations(market_id, all_data)
+        sold_data = get_sold_data(market_id, all_data)
+    except Exception as exc:
+        send_text(sender, f"❌ Error reading sheet: {exc}")
+        return
+
+    day         = MARKETS.get(market_id, "")
+    icon        = DAY_ICONS.get(day, "📦")
+    total_alloc = sum(allocs.values())
+    total_sold  = sum(v for v in sold_data.values() if v is not None)
+    sell_thru   = (total_sold / total_alloc * 100) if total_alloc > 0 else 0
+    filled      = sum(1 for v in sold_data.values() if v is not None)
+
+    lines = []
+    for i, (prod, alloc) in enumerate(allocs.items()):
+        sold   = sold_data.get(prod)
+        status = f"{sold:.0f}" if sold is not None else "⏳ --"
+        lines.append(f"{PRODUCT_EMOJIS[i]} *{prod:<12}* {alloc:.0f} → {status}")
+
+    send_text(sender,
+        f"{icon} *{market_id} | {day.upper()}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        + "\n".join(lines) +
+        f"\n━━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 Allocated : *{total_alloc:.0f}*\n"
+        f"💰 Sold      : *{total_sold:.0f}*\n"
+        f"📊 Sell-thru : *{sell_thru:.1f}%*\n"
+        f"✏️  Entries  : *{filled}/{len(PRODUCTS)}*"
+    )
+    send_buttons(sender, f"━━━━━━━━━━━━━━━━━━━━\nActions for *{market_id}*:",
         [
-            {"id": "mgr_product_summary", "title": "🔍 Product Summary"},
-            {"id": "mgr_dashboard",       "title": "📊  Dashboard"},
-            {"id": "menu",                "title": "🏠  Main Menu"},
+            {"id": f"mgr_edit_market_{market_id}", "title": "✏️  Edit Market"},
+            {"id": "mgr_dashboard",                "title": "◀  Back to Overview"},
+            {"id": "menu",                         "title": "🏠  Main Menu"},
         ]
     )
 
 
-# ── M-5: Product Summary ───────────────────────────────────────────────────
+# ── M-4: Market Status (backward compat → redirects to dashboard) ──────────
+
+def send_market_status(sender: str):
+    """Redirect to combined overview."""
+    send_dashboard(sender)
+
+
+# ── M-5: Sales Summary (backward compat → redirects to dashboard) ──────────
+
+def send_sales_summary(sender: str):
+    """Redirect to combined overview."""
+    send_dashboard(sender)
+
+
+# ── M-6: Product Summary ───────────────────────────────────────────────────
 
 def launch_product_summary(sender: str):
     SESSIONS[sender] = {"mode": "mgr_product_select"}
     rows = [
-        {"id": f"mgr_product_{i}", "title": f"{PRODUCT_EMOJIS[i]} {PRODUCTS[i]}",
-         "description": "Tap to see allocated vs sold across all markets"}
+        {
+            "id":          f"mgr_product_{i}",
+            "title":       f"{PRODUCT_EMOJIS[i]} {PRODUCTS[i]}",
+            "description": "Tap to see allocated vs sold across all markets",
+        }
         for i in range(len(PRODUCTS))
     ]
     send_list(sender,
@@ -196,12 +191,12 @@ def launch_product_summary(sender: str):
 
 
 def send_product_summary(sender: str, product_idx: int):
-    """ONE sheet read for all 12 markets of one product."""
+    """ONE sheet read for all markets of one product."""
     product = PRODUCTS[product_idx]
     emoji   = PRODUCT_EMOJIS[product_idx]
 
     try:
-        all_data = get_all_sheet_data()                            # ← single read
+        all_data = get_all_sheet_data()
     except Exception as exc:
         send_text(sender, f"❌ Error reading sheet: {exc}")
         return
@@ -238,100 +233,13 @@ def send_product_summary(sender: str, product_idx: int):
     send_buttons(sender, "━━━━━━━━━━━━━━━━━━━━",
         [
             {"id": "mgr_product_summary", "title": "◀  All Products"},
-            {"id": "mgr_sales_summary",   "title": "📈  Sales Summary"},
+            {"id": "mgr_dashboard",       "title": "📊  Overview"},
             {"id": "menu",                "title": "🏠  Main Menu"},
         ]
     )
 
 
-# ── M-6: Market Status Board ───────────────────────────────────────────────
-
-def send_market_status(sender: str):
-    """ONE sheet read for status of all 12 markets."""
-    SESSIONS[sender] = {"mode": "idle"}
-    try:
-        all_data   = get_all_sheet_data()                          # ← single read
-        status_map = build_market_status_map(all_data)
-    except Exception as exc:
-        send_text(sender, f"❌ Error reading sheet: {exc}")
-        return
-
-    lines    = ["📋 *MARKET STATUS BOARD*\n━━━━━━━━━━━━━━━━━━━━"]
-    sections = []
-
-    for day in DAYS_ORDER:
-        icon     = DAY_ICONS[day]
-        day_mkts = get_markets_by_day(day)
-        day_lines = [f"{icon} *{day}*"]
-        rows = []
-        for m in day_mkts:
-            mid    = m["id"]
-            status = status_map.get(mid, "not_started")
-            dot    = {"complete": "✅", "in_progress": "🟡", "not_started": "❌"}[status]
-            filled = count_filled(mid, all_data)                   # reuses all_data
-            day_lines.append(f"  {dot} {mid}  ({filled}/{len(PRODUCTS)})")
-            rows.append({
-                "id":          f"mgr_view_market_{mid}",
-                "title":       f"{dot} {mid}",
-                "description": f"{filled}/{len(PRODUCTS)} products entered — Tap to view",
-            })
-        lines.append("\n".join(day_lines))
-        sections.append({"title": f"{icon} {day}", "rows": rows})
-
-    send_text(sender,
-        "\n\n".join(lines) +
-        "\n━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ Complete  🟡 In Progress  ❌ Not Started\n"
-        "_Tap a market to see details_"
-    )
-    send_list(sender, "Select a market to view:", "View Market", sections)
-
-
-# ── M-7: Data Review ──────────────────────────────────────────────────────
-
-def send_market_review(sender: str, market_id: str):
-    """ONE sheet read for full market data review."""
-    try:
-        all_data  = get_all_sheet_data()                           # ← single read
-        allocs    = get_market_allocations(market_id, all_data)
-        sold_data = get_sold_data(market_id, all_data)
-    except Exception as exc:
-        send_text(sender, f"❌ Error reading sheet: {exc}")
-        return
-
-    day         = MARKETS.get(market_id, "")
-    icon        = DAY_ICONS.get(day, "📦")
-    total_alloc = sum(allocs.values())
-    total_sold  = sum(v for v in sold_data.values() if v is not None)
-    sell_thru   = (total_sold / total_alloc * 100) if total_alloc > 0 else 0
-    filled      = sum(1 for v in sold_data.values() if v is not None)
-
-    lines = []
-    for i, (prod, alloc) in enumerate(allocs.items()):
-        sold   = sold_data.get(prod)
-        status = f"{sold:.0f}" if sold is not None else "⏳ --"
-        lines.append(f"{PRODUCT_EMOJIS[i]} *{prod:<12}* {alloc:.0f} → {status}")
-
-    send_text(sender,
-        f"{icon} *{market_id} DATA REVIEW | {day.upper()}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        + "\n".join(lines) +
-        f"\n━━━━━━━━━━━━━━━━━━━━\n"
-        f"📦 Allocated : *{total_alloc:.0f}*\n"
-        f"💰 Sold      : *{total_sold:.0f}*\n"
-        f"📊 Sell-thru : *{sell_thru:.1f}%*\n"
-        f"✏️  Entries  : *{filled}/{len(PRODUCTS)}*"
-    )
-    send_buttons(sender, f"━━━━━━━━━━━━━━━━━━━━\nActions for *{market_id}*:",
-        [
-            {"id": f"mgr_edit_market_{market_id}", "title": "✏️  Edit Market"},
-            {"id": "mgr_market_status",            "title": "◀  Market Status"},
-            {"id": "menu",                         "title": "🏠  Main Menu"},
-        ]
-    )
-
-
-# ── M-8: Edit Market ──────────────────────────────────────────────────────
+# ── M-7: Edit Market ───────────────────────────────────────────────────────
 
 def start_market_edit(sender: str, market_id: str):
     try:
@@ -343,10 +251,10 @@ def start_market_edit(sender: str, market_id: str):
         return
 
     SESSIONS[sender] = {
-        "mode": "mgr_market_edit_select",
+        "mode":           "mgr_market_edit_select",
         "edit_market_id": market_id,
-        "allocations": allocs,
-        "sold_data": sold_data,
+        "allocations":    allocs,
+        "sold_data":      sold_data,
     }
     rows = [
         {
@@ -409,7 +317,6 @@ def handle_mgr_edit_input(sender: str, text: str, session: dict):
         send_text(sender, f"⚠️ Must be between *0* and *{alloc:.0f}*.")
         return
 
-    # Refresh sold data (one call)
     fresh_sold = get_sold_data(mid)
     existing   = fresh_sold.get(product)
     session["sold_data"] = fresh_sold
@@ -456,7 +363,7 @@ def cancel_mgr_edit_overwrite(sender, session):
 
 def _do_mgr_write(sender, session, idx, product, sold, market_id):
     try:
-        write_sold_box(market_id, idx, sold)   # invalidates cache automatically
+        write_sold_box(market_id, idx, sold)
     except Exception as exc:
         send_text(sender, f"❌ Save failed: {exc}")
         return
@@ -466,7 +373,7 @@ def _do_mgr_write(sender, session, idx, product, sold, market_id):
     send_market_review(sender, market_id)
 
 
-# ── M-9: All Complete Alert ────────────────────────────────────────────────
+# ── M-8: All Complete Alert ────────────────────────────────────────────────
 
 def notify_all_complete(sender: str):
     try:
@@ -493,15 +400,15 @@ def notify_all_complete(sender: str):
     )
 
 
-# ── M-10–12: Close Week ────────────────────────────────────────────────────
+# ── M-9: Close Week ────────────────────────────────────────────────────────
 
 def handle_close_week_request(sender: str):
-    if sender not in get_manager_numbers_set():
+    if not is_manager(sender):
         send_text(sender, "🔒 Only the manager can close the week.")
         return
 
     try:
-        complete = all_markets_complete()   # force=True inside
+        complete = all_markets_complete()
     except Exception:
         complete = False
 
@@ -542,7 +449,7 @@ def handle_close_confirm_text(sender: str, text: str):
 
 
 def do_close_week(sender: str):
-    if sender not in get_manager_numbers_set():
+    if not is_manager(sender):
         send_text(sender, "🔒 Access denied.")
         return
 
@@ -564,3 +471,7 @@ def do_close_week(sender: str):
         send_manager_menu(sender)
     except Exception as exc:
         send_text(sender, f"❌ Week close failed: {exc}\nCheck Google Sheet manually.")
+
+
+# ── Backward compat alias ──────────────────────────────────────────────────
+send_market_detail_status = send_market_review
