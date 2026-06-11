@@ -1,9 +1,16 @@
-
+'sheets.py'
+import time
+import json
+import os
 import time
 import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 from config import SHEET_ID, CREDS_FILE
+
+CACHE_FILE = "sheet_data_cache.json"
+CACHE_TTL = 300
+
 
 # ── Scopes ────────────────────────────────────────────────────────────────
 SCOPES = [
@@ -23,8 +30,11 @@ PRODUCTS = [
     "Beans", "Chilli", "Brinjal", "Carrot", "Pine Apple",
 ]
 
+PRODUCT_EMOJIS = ["🍎","🍌","🍅","🥔","🧅","🫘","🌶️","🍆","🥕","🍍"]
+
 CALC_SHEET_NAME    = "Calculation"
 HISTORY_SHEET_NAME = "History"
+DETAILS_SHEET_NAME = "Details"
 
 PREV_DATA_START_ROW = 6    # 0-indexed
 CURR_DATA_START_ROW = 28   # 0-indexed
@@ -44,9 +54,27 @@ TOTAL_UNSOLD_COL = 41   # AP
 TOTAL_SALESPCT   = 42   # AQ
 TOTAL_UNSOLDPCT  = 43   # AR
 
-# ── In-process cache (30 second TTL) ─────────────────────────────────────
-_CACHE: dict = {"data": None, "ts": 0.0}
-CACHE_TTL    = 30  # seconds
+# Details tab — Worker section column positions (0-indexed)
+# Row 5  = Header, Row 6+ = data
+# Worker section: cols 6-11
+# Manager section: cols 1-3
+DETAILS_WORKER_START_ROW = 5    # 0-indexed (row 6 in sheet)
+DETAILS_COL_W_NO         = 6    # Worker No
+DETAILS_COL_W_NAME       = 7    # Worker Name
+DETAILS_COL_W_PHONE      = 8    # Worker Phone
+DETAILS_COL_W_MONDAY     = 9    # Monday market
+DETAILS_COL_W_WEDNESDAY  = 10   # Wednesday market
+DETAILS_COL_W_FRIDAY     = 11   # Friday market
+
+DETAILS_COL_M_NO         = 1    # Manager No
+DETAILS_COL_M_NAME       = 2    # Manager Name
+DETAILS_COL_M_PHONE      = 3    # Manager Phone
+
+# ── Caches ────────────────────────────────────────────────────────────────
+_CACHE: dict        = {"data": None, "ts": 0.0}
+_WORKER_CACHE: dict = {"data": None, "ts": 0.0}
+CACHE_TTL        = 30   # seconds — calculation sheet
+WORKER_CACHE_TTL = 60   # seconds — worker assignments (changes rarely)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -63,34 +91,30 @@ def _spreadsheet():
 def _calc_sheet():
     return _spreadsheet().worksheet(CALC_SHEET_NAME)
 
+def _details_sheet():
+    return _spreadsheet().worksheet(DETAILS_SHEET_NAME)
 
-# ══════════════════════════════════════════════════════════════════════════
-# CORE: SINGLE-CALL FULL READ  ← solves 429 quota errors
-# ══════════════════════════════════════════════════════════════════════════
+def _load_cache():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, 'r') as f:
+            try: return json.load(f)
+            except: return {"data": None, "ts": 0}
+    return {"data": None, "ts": 0}
 
 def get_all_sheet_data(force: bool = False) -> list:
-    """
-    Fetch ALL rows from Calculation sheet in ONE API call.
-    Cached for CACHE_TTL seconds.
-
-    Before fix:  Market Status  = 24 API calls  → 429 error
-    After fix:   Market Status  =  1 API call   → no error
-    """
-    now = time.time()
-    if not force and _CACHE["data"] is not None and (now - _CACHE["ts"]) < CACHE_TTL:
-        return _CACHE["data"]
-    ws             = _calc_sheet()
-    data           = ws.get_all_values()
-    _CACHE["data"] = data
-    _CACHE["ts"]   = now
+    cache = _load_cache()
+    if not force and cache["data"] is not None and (time.time() - cache["ts"]) < CACHE_TTL:
+        return cache["data"]
+    
+    ws = _calc_sheet()
+    data = ws.get_all_values()
+    with open(CACHE_FILE, 'w') as f:
+        json.dump({"data": data, "ts": time.time()}, f)
     return data
 
-
 def invalidate_cache():
-    """Call after every write so the next read fetches fresh data."""
-    _CACHE["data"] = None
-    _CACHE["ts"]   = 0.0
-
+    if os.path.exists(CACHE_FILE):
+        os.remove(CACHE_FILE)
 
 # ══════════════════════════════════════════════════════════════════════════
 # HELPERS
@@ -107,7 +131,7 @@ def _safe_float(val) -> float | None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# READ FUNCTIONS (all accept pre-fetched all_data → zero extra API calls)
+# READ: CALCULATION SHEET
 # ══════════════════════════════════════════════════════════════════════════
 
 def get_all_markets() -> list:
@@ -120,10 +144,6 @@ def get_markets_by_day(day: str) -> list:
 
 
 def get_market_allocations(market_id: str, all_data: list = None) -> dict:
-    """
-    Return {product: allocated_boxes} for a market from Current Week table.
-    Pass all_data to avoid an extra API call.
-    """
     if all_data is None:
         all_data = get_all_sheet_data()
     col    = MARKET_COL[market_id]
@@ -137,27 +157,19 @@ def get_market_allocations(market_id: str, all_data: list = None) -> dict:
 
 
 def get_sold_data(market_id: str, all_data: list = None) -> dict:
-    """
-    Return {product: sold_boxes | None} for a market.
-    None = not yet entered.
-    """
     if all_data is None:
         all_data = get_all_sheet_data()
-    sold_col = MARKET_COL[market_id] + 1   # sold = allocated + 1
+    sold_col = MARKET_COL[market_id] + 1
     result   = {}
     for i, product in enumerate(PRODUCTS):
         row_idx = CURR_DATA_START_ROW + i
         row     = all_data[row_idx] if row_idx < len(all_data) else []
         val     = row[sold_col] if sold_col < len(row) else ""
-        result[product] = _safe_float(val)  # None if blank
+        result[product] = _safe_float(val)
     return result
 
 
 def build_market_status_map(all_data: list = None) -> dict:
-    """
-    Return {market_id: "complete" | "in_progress" | "not_started"}
-    ONE sheet read for all 12 markets.
-    """
     if all_data is None:
         all_data = get_all_sheet_data()
     status_map = {}
@@ -174,7 +186,6 @@ def build_market_status_map(all_data: list = None) -> dict:
 
 
 def count_filled(market_id: str, all_data: list = None) -> int:
-    """How many products have sold data for this market."""
     if all_data is None:
         all_data = get_all_sheet_data()
     sold = get_sold_data(market_id, all_data)
@@ -182,7 +193,6 @@ def count_filled(market_id: str, all_data: list = None) -> int:
 
 
 def compute_week_totals(all_data: list = None) -> dict:
-    """Total allocated + sold across all 12 markets. ONE sheet read."""
     if all_data is None:
         all_data = get_all_sheet_data()
     total_alloc = total_sold = 0.0
@@ -195,14 +205,264 @@ def compute_week_totals(all_data: list = None) -> dict:
 
 
 def all_markets_complete(all_data: list = None) -> bool:
-    """True when every sold cell in Current Week is filled."""
     if all_data is None:
-        all_data = get_all_sheet_data(force=True)  # force fresh for close-week
+        all_data = get_all_sheet_data(force=True)
     for market_id in MARKETS:
         sold = get_sold_data(market_id, all_data)
         if any(v is None for v in sold.values()):
             return False
     return True
+
+
+def is_day_complete(day: str, all_data: list = None) -> bool:
+    """
+    Check if ALL markets for a given day have 10/10 products filled.
+    Monday   → M1 M2 M3 M4
+    Wednesday→ M5 M6 M7 M8
+    Friday   → M9 M10 M11 M12
+    """
+    if all_data is None:
+        all_data = get_all_sheet_data()
+    day_markets = [mid for mid, d in MARKETS.items() if d == day]
+    for mid in day_markets:
+        sold = get_sold_data(mid, all_data)
+        if any(v is None for v in sold.values()):
+            return False
+    return True
+
+
+def get_reallocation_view(market_id: str, all_data: list = None) -> list:
+    """
+    For a worker's completed market, show:
+      - Each product: allocated, sold, remaining
+      - Next day markets: what the sheet has allocated (includes reallocation)
+
+    Returns list of dicts per product:
+    [
+      {
+        "product":   "Apple",
+        "emoji":     "🍎",
+        "allocated": 156.0,
+        "sold":      134.0,
+        "remain":    22.0,
+        "next_day_allocs": {"M5": 95.0, "M6": 88.0, "M7": 91.0, "M8": 85.0}
+      },
+      ...
+    ]
+
+    next_day_allocs = sheet formula result values (already includes
+    Monday remaining redistributed to Wednesday markets by sheet formula).
+    Worker sees: "My 22 Apple boxes are going to M5(95), M7(91)..." etc.
+    """
+    if all_data is None:
+        all_data = get_all_sheet_data(force=True)  # force fresh — Monday just completed
+
+    day = MARKETS.get(market_id, "")
+    next_day_markets = {
+        "Monday":    ["M5", "M6", "M7", "M8"],
+        "Wednesday": ["M9", "M10", "M11", "M12"],
+        "Friday":    [],
+    }.get(day, [])
+
+    allocs    = get_market_allocations(market_id, all_data)
+    sold_data = get_sold_data(market_id, all_data)
+
+    # Read next day allocations from sheet (formula result — includes reallocation)
+    next_day_allocs = {}
+    for mid in next_day_markets:
+        next_day_allocs[mid] = get_market_allocations(mid, all_data)
+
+    result = []
+    for i, product in enumerate(PRODUCTS):
+        allocated = allocs.get(product, 0.0)
+        sold      = sold_data.get(product) or 0.0
+        remain    = max(0.0, allocated - sold)
+
+        # Next day split values from sheet for this product
+        splits = {}
+        for mid in next_day_markets:
+            val = next_day_allocs[mid].get(product, 0.0)
+            if val > 0:
+                splits[mid] = val
+
+        result.append({
+            "product":        product,
+            "emoji":          PRODUCT_EMOJIS[i],
+            "allocated":      allocated,
+            "sold":           sold,
+            "remain":         remain,
+            "next_day_allocs": splits,
+        })
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# READ: DETAILS SHEET — Worker & Manager assignments
+# ══════════════════════════════════════════════════════════════════════════
+
+def _get_details_rows(force: bool = False) -> dict:
+    """
+    Read Details tab once. Cached for WORKER_CACHE_TTL seconds.
+    Returns:
+    {
+      "managers": [{"name": "Priya", "phone": "919876543210"}, ...],
+      "workers":  [
+        {"name": "Ravi", "phone": "919876543211",
+         "Monday": "M1", "Wednesday": "M5", "Friday": "M9"},
+        ...
+      ]
+    }
+    """
+    now = time.time()
+    if (not force
+            and _WORKER_CACHE["data"] is not None
+            and (now - _WORKER_CACHE["ts"]) < WORKER_CACHE_TTL):
+        return _WORKER_CACHE["data"]
+
+    ws   = _details_sheet()
+    rows = ws.get_all_values()
+
+    managers = []
+    workers  = []
+
+    for row in rows[DETAILS_WORKER_START_ROW:]:
+        if not any(str(v).strip() for v in row):
+            continue
+
+        def _cell(col):
+            val = str(row[col]).strip() if col < len(row) else ""
+            return val.replace(".0", "").strip()
+
+        # Manager section (cols 1-3)
+        m_phone = _cell(DETAILS_COL_M_PHONE)
+        m_name  = _cell(DETAILS_COL_M_NAME)
+        if m_phone and m_name and m_phone not in ("", "-"):
+            managers.append({"name": m_name, "phone": m_phone})
+
+        # Worker section (cols 6-11)
+        w_phone = _cell(DETAILS_COL_W_PHONE)
+        w_name  = _cell(DETAILS_COL_W_NAME)
+        if w_phone and w_name and w_phone not in ("", "-"):
+            workers.append({
+                "name":      w_name,
+                "phone":     w_phone,
+                "Monday":    _cell(DETAILS_COL_W_MONDAY)    or "-",
+                "Wednesday": _cell(DETAILS_COL_W_WEDNESDAY) or "-",
+                "Friday":    _cell(DETAILS_COL_W_FRIDAY)    or "-",
+            })
+
+    data = {"managers": managers, "workers": workers}
+    _WORKER_CACHE["data"] = data
+    _WORKER_CACHE["ts"]   = now
+    return data
+
+
+def get_manager_numbers() -> set:
+    """
+    Return set of manager phone numbers from Details tab.
+    Used by shared.py instead of hardcoded MANAGER_NUMBERS.
+    """
+    try:
+        details = _get_details_rows()
+        return {m["phone"] for m in details["managers"]}
+    except Exception as exc:
+        print(f"get_manager_numbers error: {exc}")
+        return set()
+
+
+def get_worker_by_phone(phone: str) -> dict | None:
+    """
+    Get worker info by phone number.
+    Handles country codes (+91, 91) and extracts the last 10 digits to match with sheet.
+    """
+    # Clean string: remove decimals, spaces, or plus signs
+    phone_clean = str(phone).strip().replace(".0", "").replace("+", "")
+    
+    # Extract last 10 digits if the number is longer (e.g., 9198439xxxxx -> 98439xxxxx)
+    if len(phone_clean) > 10:
+        phone_clean = phone_clean[-10:]
+        
+    try:
+        for w in _get_details_rows()["workers"]:
+            # Clean sheet number also just in case
+            sheet_phone = str(w["phone"]).strip().replace(".0", "").replace("+", "")
+            if len(sheet_phone) > 10:
+                sheet_phone = sheet_phone[-10:]
+                
+            if sheet_phone == phone_clean:
+                return w
+    except Exception as exc:
+        print(f"get_worker_by_phone error: {exc}")
+    return None
+
+
+def get_assigned_market(phone: str, day: str) -> str | None:
+    """
+    Get market assigned to a worker on a specific day.
+    Returns "M1" etc. or None if not assigned.
+    """
+    worker = get_worker_by_phone(phone)
+    if not worker:
+        return None
+    market = worker.get(day, "-")
+    return market if market not in ("", "-") else None
+
+
+def get_worker_by_market(market_id: str) -> dict | None:
+    """
+    Get the worker assigned to a specific market (any day).
+    Returns worker dict or None.
+    """
+    try:
+        for w in _get_details_rows()["workers"]:
+            for day in ("Monday", "Wednesday", "Friday"):
+                if w.get(day) == market_id:
+                    return w
+    except Exception as exc:
+        print(f"get_worker_by_market error: {exc}")
+    return None
+
+
+def get_workers_by_day(day: str) -> list:
+    """
+    Get all workers assigned on a specific day.
+    Returns [{"phone", "name", "market"}, ...]
+    """
+    result = []
+    try:
+        for w in _get_details_rows()["workers"]:
+            market = w.get(day, "-")
+            if market and market not in ("", "-"):
+                result.append({
+                    "phone":  w["phone"],
+                    "name":   w["name"],
+                    "market": market,
+                })
+    except Exception as exc:
+        print(f"get_workers_by_day error: {exc}")
+    return result
+
+
+def get_all_markets_for_worker(phone: str) -> dict:
+    """
+    Get all markets assigned to a worker across all days.
+    Returns {"Monday": "M1", "Wednesday": "M6", "Friday": "-"}
+    """
+    worker = get_worker_by_phone(phone)
+    if not worker:
+        return {"Monday": "-", "Wednesday": "-", "Friday": "-"}
+    return {
+        "Monday":    worker.get("Monday",    "-"),
+        "Wednesday": worker.get("Wednesday", "-"),
+        "Friday":    worker.get("Friday",    "-"),
+    }
+
+
+def invalidate_worker_cache():
+    """Call when manager updates worker assignments in sheet."""
+    _WORKER_CACHE["data"] = None
+    _WORKER_CACHE["ts"]   = 0.0
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -212,8 +472,6 @@ def all_markets_complete(all_data: list = None) -> bool:
 def write_sold_box(market_id: str, product_index: int, sold_value: float):
     """
     Write sold boxes for one product in one market.
-    Row  = CURR_DATA_START_ROW + product_index  (0-indexed → +1 for gspread)
-    Col  = MARKET_COL[market_id] + 1 (sold offset) + 1 (gspread 1-indexed)
     Invalidates cache so next read gets fresh data.
     """
     ws    = _calc_sheet()
@@ -230,9 +488,9 @@ def write_sold_box(market_id: str, product_index: int, sold_value: float):
 def rotate_sheets():
     """
     End-of-week rotation:
-      Step 1: Archive Current Week → History tab (stacked, date-headed)
-      Step 2: Copy Current Week    → Previous Week table (values only)
-      Step 3: Reset Current Week   (clear sold + total allocated)
+      Step 1: Archive Current Week → History tab
+      Step 2: Copy Current Week    → Previous Week table
+      Step 3: Reset Current Week
     """
     spreadsheet = _spreadsheet()
     ws          = spreadsheet.worksheet(CALC_SHEET_NAME)
@@ -244,17 +502,7 @@ def rotate_sheets():
     invalidate_cache()
 
 
-# ── Step 1: Archive ────────────────────────────────────────────────────────
-
 def _archive_to_history(spreadsheet, all_values):
-    """
-    Archive Current Week data into History tab (single tab, stacked).
-    Format per week block:
-      Row A : ══ Week N | Month YYYY | Mon DD Mon – Sun DD Mon YYYY ══
-      Row B : Product | M1 Allocated | M1 Sold | M1 Market% | M2 ... | Totals
-      Rows  : 10 product data rows
-      Row   : blank separator
-    """
     try:
         hist_ws = spreadsheet.worksheet(HISTORY_SHEET_NAME)
     except gspread.WorksheetNotFound:
@@ -262,7 +510,6 @@ def _archive_to_history(spreadsheet, all_values):
             HISTORY_SHEET_NAME, rows=1000, cols=50
         )
 
-    # ── Week date header ──────────────────────────────────────────
     today      = datetime.date.today()
     week_end   = today - datetime.timedelta(days=today.weekday() + 1)
     week_start = week_end - datetime.timedelta(days=6)
@@ -273,30 +520,26 @@ def _archive_to_history(spreadsheet, all_values):
     existing_data = hist_ws.get_all_values()
     week_num      = sum(1 for row in existing_data
                         if row and "Week" in str(row[0])) + 1
-    week_header   = f"══ Week {week_num}  |  {month_name}  |  {date_range}  ══"
+    week_header   = f"Week {week_num}  |  {month_name}  |  {date_range}"
 
-    # ── Column header row ─────────────────────────────────────────
     col_header = ["Product"]
     for mid in MARKETS:
         col_header += [f"{mid} Allocated", f"{mid} Sold", f"{mid} Market%"]
     col_header += ["Total Allocated", "Total Sales",
                    "Total Unsold", "Total Sales%", "Total Unsales%"]
 
-    # ── Product data rows ─────────────────────────────────────────
     data_rows = []
     for i, product in enumerate(PRODUCTS):
         curr_row = all_values[CURR_DATA_START_ROW + i]
         row_data = [product]
-
         for base_col in MARKET_COL.values():
-            for offset in range(3):  # allocated, sold, market%
+            for offset in range(3):
                 try:
                     raw = curr_row[base_col + offset]
                     val = _safe_float(raw)
                     row_data.append(val if val is not None else "")
                 except IndexError:
                     row_data.append("")
-
         for tc in [TOTAL_ALLOC_COL, TOTAL_SALES_COL,
                    TOTAL_UNSOLD_COL, TOTAL_SALESPCT, TOTAL_UNSOLDPCT]:
             try:
@@ -305,22 +548,15 @@ def _archive_to_history(spreadsheet, all_values):
                 row_data.append(val if val is not None else "")
             except IndexError:
                 row_data.append("")
-
         data_rows.append(row_data)
 
-    # ── Append to History tab ────────────────────────────────────
     next_row = len(existing_data) + 1
     if existing_data and any(existing_data[-1]):
-        next_row += 1   # blank separator between weeks
+        next_row += 1
 
     rows_to_write = [[week_header], col_header] + data_rows + [[""]]
-    hist_ws.update(
-        f"A{next_row}",
-        rows_to_write,
-        value_input_option="USER_ENTERED"
-    )
+    hist_ws.update(f"A{next_row}", rows_to_write, value_input_option="USER_ENTERED")
 
-    # Bold + colour the week header row
     try:
         hist_ws.format(f"A{next_row}", {
             "textFormat":      {"bold": True, "fontSize": 11},
@@ -330,39 +566,26 @@ def _archive_to_history(spreadsheet, all_values):
         pass
 
 
-# ── Step 2: Copy Current → Previous ───────────────────────────────────────
-
 def _copy_current_to_previous(ws, all_values):
-    """
-    Copy Current Week → Previous Week table.
-    Copies: Allocated, Sold per market.
-    Recalculates Market% = Sold / Total Allocated (stores as decimal).
-    """
     updates = []
     for i in range(NUM_PRODUCTS):
         curr_row   = all_values[CURR_DATA_START_ROW + i]
-        prev_row_1 = PREV_DATA_START_ROW + i + 1   # 1-indexed
+        prev_row_1 = PREV_DATA_START_ROW + i + 1
 
-        # Total Allocated from AN column (0-indexed 39)
         try:
             total_alloc = _safe_float(curr_row[TOTAL_ALLOC_COL]) or 0.0
         except IndexError:
             total_alloc = 0.0
 
         for base_col in MARKET_COL.values():
-            # Allocated
             alloc_val = _safe_float(
-                curr_row[base_col] if base_col < len(curr_row) else ""
-            ) or 0.0
+                curr_row[base_col] if base_col < len(curr_row) else "") or 0.0
             updates.append(gspread.Cell(prev_row_1, base_col + 1, alloc_val))
 
-            # Sold
             sold_val = _safe_float(
-                curr_row[base_col + 1] if (base_col + 1) < len(curr_row) else ""
-            ) or 0.0
+                curr_row[base_col + 1] if (base_col + 1) < len(curr_row) else "") or 0.0
             updates.append(gspread.Cell(prev_row_1, base_col + 2, sold_val))
 
-            # Market% = Sold / Total Allocated
             market_pct = (sold_val / total_alloc) if total_alloc > 0 else 0.0
             updates.append(gspread.Cell(prev_row_1, base_col + 3, market_pct))
 
@@ -370,26 +593,13 @@ def _copy_current_to_previous(ws, all_values):
         ws.update_cells(updates, value_input_option="RAW")
 
 
-# ── Step 3: Reset Current Week ────────────────────────────────────────────
-
 def _reset_current_week(ws):
-    """
-    Clear Current Week:
-      - Sold Boxes cells (12 markets × 10 products)
-      - Total Allocated column AN (col 40, 1-indexed)
-    Formulas stay intact → sheet auto-recalculates when manager
-    enters new Total Allocated next week.
-    """
     clears = []
     for i in range(NUM_PRODUCTS):
-        row_1 = CURR_DATA_START_ROW + i + 1   # 1-indexed
-
+        row_1 = CURR_DATA_START_ROW + i + 1
         for base_col in MARKET_COL.values():
-            sold_col_1 = base_col + 2   # sold offset(+1) + 1-index(+1)
+            sold_col_1 = base_col + 2
             clears.append(gspread.Cell(row_1, sold_col_1, ""))
-
-        # Clear Total Allocated — AN = col 40 (1-indexed)
         clears.append(gspread.Cell(row_1, TOTAL_ALLOC_COL + 1, ""))
-
     if clears:
         ws.update_cells(clears, value_input_option="RAW")
