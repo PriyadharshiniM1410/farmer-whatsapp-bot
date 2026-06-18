@@ -1,3 +1,6 @@
+# Agroapp
+Agro app using WhatsApp, Python and Google Sheets 
+
 # Farmer WhatsApp Bot
 
 ## Project Structure
