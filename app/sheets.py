@@ -35,17 +35,29 @@ CURR_DATA_START_ROW = 28
 NUM_PRODUCTS        = 10
 NUM_MARKETS         = 12
 
-MARKET_COL = {
-    "M1": 3,  "M2": 6,  "M3": 9,  "M4": 12,
-    "M5": 15, "M6": 18, "M7": 21, "M8": 24,
-    "M9": 27, "M10": 30, "M11": 33, "M12": 36,
+
+FINAL_ALLOC_COL = {
+    "M1": 5,
+    "M2": 10,
+    "M3": 15,
+    "M4": 20,
+    "M5": 25,
+    "M6": 30,
+    "M7": 35,
+    "M8": 40,
+    "M9": 45,
+    "M10": 50,
+    "M11": 55,
+    "M12": 60,
 }
 
-TOTAL_ALLOC_COL  = 39
-TOTAL_SALES_COL  = 40
-TOTAL_UNSOLD_COL = 41
-TOTAL_SALESPCT   = 42
-TOTAL_UNSOLDPCT  = 43
+# Correct values (0-based index)
+
+TOTAL_ALLOC_COL  = 63   # BL
+TOTAL_SALES_COL  = 64   # BM
+TOTAL_UNSOLD_COL = 65   # BN
+TOTAL_SALESPCT   = 66   # BO
+TOTAL_UNSOLDPCT  = 67   # BP
 
 DETAILS_WORKER_START_ROW = 5
 DETAILS_COL_W_NO         = 6
@@ -69,12 +81,12 @@ WORKER_CACHE_TTL = 60
 def _client():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
     if creds_json:
-        # Koyeb cloud-ல run ஆகும்போது
+        # Koyeb cloud-ல run
         import json
         creds_dict = json.loads(creds_json)
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     else:
-        # உங்கள் laptop-ல locally run ஆகும்போது
+        # உங்கள் laptop-ல locally run
         creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
     return gspread.authorize(creds)
 
@@ -138,7 +150,7 @@ def get_markets_by_day(day: str) -> list:
 def get_market_allocations(market_id: str, all_data: list = None) -> dict:
     if all_data is None:
         all_data = get_all_sheet_data()
-    col = MARKET_COL[market_id]
+    col = FINAL_ALLOC_COL[market_id]
     result = {}
     for i, product in enumerate(PRODUCTS):
         row_idx = CURR_DATA_START_ROW + i
@@ -151,7 +163,7 @@ def get_market_allocations(market_id: str, all_data: list = None) -> dict:
 def get_sold_data(market_id: str, all_data: list = None) -> dict:
     if all_data is None:
         all_data = get_all_sheet_data()
-    sold_col = MARKET_COL[market_id] + 1
+    sold_col = FINAL_ALLOC_COL[market_id] + 1
     result = {}
     for i, product in enumerate(PRODUCTS):
         row_idx = CURR_DATA_START_ROW + i
@@ -340,7 +352,7 @@ def get_workers_by_day(day: str) -> list:
 def write_sold_box(market_id: str, product_index: int, sold_value: float):
     ws    = _calc_sheet()
     row_1 = CURR_DATA_START_ROW + product_index + 1
-    col_1 = MARKET_COL[market_id] + 1 + 1
+    col_1 = FINAL_ALLOC_COL[market_id] + 1 + 1
     ws.update_cell(row_1, col_1, sold_value)
     invalidate_cache()
 
@@ -385,7 +397,7 @@ def _archive_to_history(spreadsheet, all_values):
     for i, product in enumerate(PRODUCTS):
         curr_row = all_values[CURR_DATA_START_ROW + i]
         row_data = [product]
-        for base_col in MARKET_COL.values():
+        for base_col in FINAL_ALLOC_COL.values():
             for offset in range(3):
                 try:
                     raw = curr_row[base_col + offset]
@@ -430,7 +442,7 @@ def _copy_current_to_previous(ws, all_values):
         except IndexError:
             total_alloc = 0.0
 
-        for base_col in MARKET_COL.values():
+        for base_col in FINAL_ALLOC_COL.values():
             alloc_val = _safe_float(
                 curr_row[base_col] if base_col < len(curr_row) else "") or 0.0
             updates.append(gspread.Cell(prev_row_1, base_col + 1, alloc_val))
@@ -450,7 +462,7 @@ def _reset_current_week(ws):
     clears = []
     for i in range(NUM_PRODUCTS):
         row_1 = CURR_DATA_START_ROW + i + 1
-        for base_col in MARKET_COL.values():
+        for base_col in FINAL_ALLOC_COL.values():
             clears.append(gspread.Cell(row_1, base_col + 2, ""))
         clears.append(gspread.Cell(row_1, TOTAL_ALLOC_COL + 1, ""))
     if clears:
