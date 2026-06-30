@@ -1,12 +1,11 @@
 # Agroapp
 Agro app using WhatsApp, Python and Google Sheets 
 
-# Farmer WhatsApp Bot
 
 ## Project Structure
 
 ```text
-farmer-whatsapp-bot/
+Agroapp
 │
 ├── app/
 │   ├── __init__.py
@@ -40,7 +39,7 @@ farmer-whatsapp-bot/
 
 ```bash
 git clone <repository-url>
-cd farmer-whatsapp-bot
+cd Agroapp
 ```
 
 ### 2. Create Virtual Environment
