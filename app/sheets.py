@@ -350,12 +350,15 @@ def get_workers_by_day(day: str) -> list:
 # ── Write ─────────────────────────────────────────────────────────────────
 
 def write_sold_box(market_id: str, product_index: int, sold_value: float):
-    ws    = _calc_sheet()
+    ws = _calc_sheet()
+
     row_1 = CURR_DATA_START_ROW + product_index + 1
-    col_1 = FINAL_ALLOC_COL[market_id] + 1 + 1
+
+    # Final Allocated column + 2 = Sold Boxes column
+    col_1 = FINAL_ALLOC_COL[market_id] + 2
+
     ws.update_cell(row_1, col_1, sold_value)
     invalidate_cache()
-
 
 # ── Sheet rotation ────────────────────────────────────────────────────────
 
