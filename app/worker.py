@@ -8,13 +8,12 @@ from app.sheets import (
     get_manager_numbers,
     get_worker_by_phone, get_sold_data,
     get_all_sheet_data, get_reallocation_view,
-    MARKETS, PRODUCTS,
+    build_market_map, get_products, get_product_emoji,
 )
 from app.whatsapp import send_text, send_buttons, send_list
-from app.shared import SESSIONS, is_manager, PRODUCT_EMOJIS, DAY_ICONS
+from app.shared import SESSIONS, is_manager, get_day_icon, get_days_order
 
 COMPLETED_MARKETS: dict = {}
-DAY_ORDER = ["Monday", "Wednesday", "Friday"]
 
 
 # ── Helper ────────────────────────────────────────────────────────────────
@@ -22,9 +21,9 @@ DAY_ORDER = ["Monday", "Wednesday", "Friday"]
 def update_sheet_sold_qty(market_id: str, product_name: str, sold_val: int):
     """Write sold quantity to Google Sheets for the given product."""
     try:
-        for idx, item in enumerate(PRODUCTS):
-            p_str = item.get("name") if isinstance(item, dict) else str(item)
-            if p_str == product_name:
+        products = get_products()
+        for idx, p_name in enumerate(products):
+            if p_name == product_name:
                 write_sold_box(market_id, idx, float(sold_val))
                 return
     except Exception as exc:
@@ -43,7 +42,7 @@ def route_on_greeting(sender: str, session: dict):
 
     name     = worker.get("name", "Worker")
     assigned = []
-    for day in DAY_ORDER:
+    for day in get_days_order():
         mid = worker.get(day, "-")
         if mid and mid != "-":
             assigned.append({"day": day, "market_id": mid})
@@ -53,9 +52,9 @@ def route_on_greeting(sender: str, session: dict):
         return
 
     all_data = get_all_sheet_data()
+    products = get_products()
     SESSIONS[sender] = {"mode": "idle", "worker": worker, "name": name}
 
-    icon_map       = {"Monday": "🟦", "Wednesday": "🟧", "Friday": "🟥"}
     status_lines   = []
     allocation_rows = []
     market_rows    = []
@@ -63,12 +62,12 @@ def route_on_greeting(sender: str, session: dict):
     for a in assigned:
         mid  = a["market_id"]
         day  = a["day"]
-        icon = icon_map.get(day, "📦")
+        icon = get_day_icon(day)
 
         sold    = get_sold_data(mid, all_data)
         filled  = sum(1 for v in sold.values() if v is not None and v != "")
         is_locked = mid in COMPLETED_MARKETS.get(sender, set())
-        status  = "✅ Complete" if (is_locked or filled == len(PRODUCTS)) else "⬜ Not started"
+        status  = "✅ Complete" if (is_locked or filled == len(products)) else "⬜ Not started"
 
         status_lines.append(f"{icon} *{mid}* — {day} | {status}")
         allocation_rows.append({
@@ -118,29 +117,25 @@ def send_product_manifest_dashboard(sender: str, market_id: str):
         return
 
     try:
-        all_data  = get_all_sheet_data(force=True)
-        allocs    = get_market_allocations(market_id, all_data)
-        sold_data = get_sold_data(market_id, all_data)
+        all_data   = get_all_sheet_data(force=True)
+        market_map = build_market_map(all_data)
+        products   = get_products(all_data)
+        allocs     = get_market_allocations(market_id, all_data, market_map, products)
+        sold_data  = get_sold_data(market_id, all_data, market_map, products)
     except Exception as exc:
         send_text(sender, f"❌ Error loading dashboard metrics: {exc}")
         return
 
-    icon_map = {"Monday": "🟦", "Wednesday": "🟧", "Friday": "🟥"}
-    day      = MARKETS.get(market_id, "Market")
-    day_icon = icon_map.get(day, "📦")
+    day      = market_map.get(market_id, {}).get("day", "Market")
+    day_icon = get_day_icon(day)
 
     product_rows    = []
     filled_count    = 0
     total_allocated = 0
     total_sold      = 0
 
-    for idx, item in enumerate(PRODUCTS):
-        if isinstance(item, dict):
-            p_name  = item.get("name", f"Product {idx + 1}")
-            p_emoji = item.get("emoji", "📦")
-        else:
-            p_name  = str(item)
-            p_emoji = PRODUCT_EMOJIS[idx] if idx < len(PRODUCT_EMOJIS) else "📦"
+    for idx, p_name in enumerate(products):
+        p_emoji = get_product_emoji(p_name)
 
         allocated    = allocs.get(p_name, 0) if isinstance(allocs, dict) else 0
         current_sold = sold_data.get(p_name, None) if isinstance(sold_data, dict) else None
@@ -178,7 +173,7 @@ def send_product_manifest_dashboard(sender: str, market_id: str):
         f"📦 Total Allocated : {total_allocated:.0f}\n"
         f"💰 Total Sold      : {total_sold}\n"
         f"📊 Sell-thru Qty   : {sell_thru:.1f}%\n"
-        f"✏️ Logged Progress : *{filled_count}/{len(PRODUCTS)} Products*\n"
+        f"✏️ Logged Progress : *{filled_count}/{len(products)} Products*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👇 Tap below to select any product to enter or edit its numbers directly:"
     )
@@ -190,7 +185,7 @@ def send_product_manifest_dashboard(sender: str, market_id: str):
         sections=[{"title": "Select Product", "rows": product_rows}],
     )
 
-    if filled_count == len(PRODUCTS):
+    if filled_count == len(products):
         send_buttons(
             to=sender,
             body="✅ All products are completely filled out! If everything looks correct, submit your final sheet lock.",
@@ -207,11 +202,13 @@ def complete_market(sender: str, session: dict):
         return
 
     try:
-        all_data  = get_all_sheet_data(force=True)
-        allocs    = get_market_allocations(market_id, all_data)
-        sold_data = get_sold_data(market_id, all_data)
+        all_data   = get_all_sheet_data(force=True)
+        market_map = build_market_map(all_data)
+        products   = get_products(all_data)
+        allocs     = get_market_allocations(market_id, all_data, market_map, products)
+        sold_data  = get_sold_data(market_id, all_data, market_map, products)
     except Exception:
-        allocs, sold_data = {}, {}
+        products, allocs, sold_data = get_products(), {}, {}
 
     COMPLETED_MARKETS.setdefault(sender, set()).add(market_id)
     SESSIONS.pop(sender, None)
@@ -222,9 +219,8 @@ def complete_market(sender: str, session: dict):
         f" # │ Product      │Alloc│ Sold\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     ]
-    for i, item in enumerate(PRODUCTS):
-        prod  = item.get("name") if isinstance(item, dict) else str(item)
-        emoji = item.get("emoji", "📦") if isinstance(item, dict) else PRODUCT_EMOJIS[i]
+    for i, prod in enumerate(products):
+        emoji = get_product_emoji(prod)
         alloc = allocs.get(prod, 0)
         sold  = sold_data.get(prod)
         sold_str = f"✅ {sold:.0f}" if sold is not None and sold != "" else "⬜ --"
@@ -250,22 +246,30 @@ def complete_market(sender: str, session: dict):
 # ── Step 4: Allocation split view ─────────────────────────────────────────
 
 def send_allocation_view(sender: str, market_id: str):
-    day      = MARKETS.get(market_id, "")
-    icon     = DAY_ICONS.get(day, "📦")
-    next_day = {"Monday": "Wednesday", "Wednesday": "Friday"}.get(day, "")
+    all_data   = get_all_sheet_data(force=True)
+    market_map = build_market_map(all_data)
+    products   = get_products(all_data)
+
+    day      = market_map.get(market_id, {}).get("day", "")
+    icon     = get_day_icon(day)
+
+    days_order = get_days_order()
+    if day in days_order and days_order.index(day) + 1 < len(days_order):
+        next_day = days_order[days_order.index(day) + 1]
+    else:
+        next_day = ""
 
     if not next_day:
         send_text(sender, "ℹ️ Friday is the last day. No reallocation needed.")
         return
 
     try:
-        all_data    = get_all_sheet_data(force=True)
-        day_markets = [mid for mid, d in MARKETS.items() if d == day]
+        day_markets = [mid for mid, info in market_map.items() if info["day"] == day]
         pending     = []
         for mid in day_markets:
-            sold   = get_sold_data(mid, all_data)
+            sold   = get_sold_data(mid, all_data, market_map, products)
             filled = sum(1 for v in sold.values() if v is not None and v != "")
-            if filled < len(PRODUCTS):
+            if filled < len(products):
                 pending.append(mid)
     except Exception as exc:
         send_text(sender, f"❌ Error: {exc}")
@@ -290,7 +294,7 @@ def send_allocation_view(sender: str, market_id: str):
         send_text(sender, f"❌ Error: {exc}")
         return
 
-    next_markets = [mid for mid, d in MARKETS.items() if d == next_day]
+    next_markets = [mid for mid, info in market_map.items() if info["day"] == next_day]
     header = (
         f"{icon} *{market_id} — REALLOCATION PLAN*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
