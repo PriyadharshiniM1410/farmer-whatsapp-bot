@@ -1,13 +1,13 @@
 from app.sheets import (
     get_all_sheet_data,
     get_market_allocations, get_markets_by_day, get_sold_data,
-    write_sold_box, all_markets_complete, rotate_sheets,
+    write_sold_box, all_markets_complete,
     build_market_status_map, count_filled, compute_week_totals,
-    MARKETS, PRODUCTS,
+    build_market_map, get_products, get_product_emoji,
 )
 from app.whatsapp import send_text, send_buttons, send_list
 from app.shared import (
-    SESSIONS, is_manager, PRODUCT_EMOJIS, DAY_ICONS, DAYS_ORDER,
+    SESSIONS, is_manager, get_day_icon, get_days_order,
     get_manager_numbers_set,
 )
 
@@ -25,7 +25,6 @@ def send_manager_menu(sender: str):
         [
             {"id": "mgr_dashboard",       "title": "📊  Overview"},
             {"id": "mgr_product_summary", "title": "🔍  Product Summary"},
-            {"id": "mgr_close_week",      "title": "🔄  Close Week"},
         ]
     )
 
@@ -39,10 +38,12 @@ def send_dashboard(sender: str):
         all_data   = get_all_sheet_data()
         status_map = build_market_status_map(all_data)
         totals     = compute_week_totals(all_data)
+        products   = get_products(all_data)
     except Exception as exc:
         send_text(sender, f"❌ Error reading sheet: {exc}")
         return
 
+    total_markets = len(status_map)
     total_alloc = totals["total_alloc"]
     total_sold  = totals["total_sold"]
     unsold      = total_alloc - total_sold
@@ -51,6 +52,8 @@ def send_dashboard(sender: str):
     completed = sum(1 for s in status_map.values() if s == "complete")
     in_prog   = sum(1 for s in status_map.values() if s == "in_progress")
     pending   = sum(1 for s in status_map.values() if s == "not_started")
+
+    days_order = get_days_order()
 
     # ── Section 1: Sales totals ──
     lines = [
@@ -61,15 +64,15 @@ def send_dashboard(sender: str):
         f"🔴 Unsold     : *{unsold:,.0f} boxes*",
         f"📈 Sell-thru  : *{sell_thru:.1f}%*",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"✅ Complete   : *{completed}/12*",
-        f"🟡 In Progress: *{in_prog}/12*",
-        f"❌ Not Started: *{pending}/12*",
+        f"✅ Complete   : *{completed}/{total_markets}*",
+        f"🟡 In Progress: *{in_prog}/{total_markets}*",
+        f"❌ Not Started: *{pending}/{total_markets}*",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
     # ── Section 2: Day-wise breakdown + market grid ──
-    for day in DAYS_ORDER:
-        icon     = DAY_ICONS[day]
+    for day in days_order:
+        icon     = get_day_icon(day)
         day_mkts = get_markets_by_day(day)
 
         # Day totals
@@ -89,14 +92,14 @@ def send_dashboard(sender: str):
             status = status_map.get(mid, "not_started")
             dot    = {"complete": "✅", "in_progress": "🟡", "not_started": "❌"}[status]
             filled = count_filled(mid, all_data)
-            lines.append(f"  {dot} {mid}  ({filled}/{len(PRODUCTS)})")
+            lines.append(f"  {dot} {mid}  ({filled}/{len(products)})")
 
     send_text(sender, "\n".join(lines))
 
     # ── Tap market to view/edit ──
     sections = []
-    for day in DAYS_ORDER:
-        icon     = DAY_ICONS[day]
+    for day in days_order:
+        icon     = get_day_icon(day)
         day_mkts = get_markets_by_day(day)
         rows = []
         for m in day_mkts:
@@ -107,7 +110,7 @@ def send_dashboard(sender: str):
             rows.append({
                 "id":          f"mgr_view_market_{mid}",
                 "title":       f"{dot} {mid}",
-                "description": f"{filled}/{len(PRODUCTS)} products — Tap to view/edit",
+                "description": f"{filled}/{len(products)} products — Tap to view/edit",
             })
         sections.append({"title": f"{icon} {day}", "rows": rows})
 
@@ -119,25 +122,26 @@ def send_dashboard(sender: str):
 def send_market_review(sender: str, market_id: str):
     """ONE sheet read → full market data with edit option."""
     try:
-        all_data  = get_all_sheet_data()
-        allocs    = get_market_allocations(market_id, all_data)
-        sold_data = get_sold_data(market_id, all_data)
+        all_data   = get_all_sheet_data()
+        market_map = build_market_map(all_data)
+        allocs     = get_market_allocations(market_id, all_data)
+        sold_data  = get_sold_data(market_id, all_data)
     except Exception as exc:
         send_text(sender, f"❌ Error reading sheet: {exc}")
         return
 
-    day         = MARKETS.get(market_id, "")
-    icon        = DAY_ICONS.get(day, "📦")
+    day         = market_map.get(market_id, {}).get("day", "")
+    icon        = get_day_icon(day)
     total_alloc = sum(allocs.values())
     total_sold  = sum(v for v in sold_data.values() if v is not None)
     sell_thru   = (total_sold / total_alloc * 100) if total_alloc > 0 else 0
     filled      = sum(1 for v in sold_data.values() if v is not None)
 
     lines = []
-    for i, (prod, alloc) in enumerate(allocs.items()):
+    for prod, alloc in allocs.items():
         sold   = sold_data.get(prod)
         status = f"{sold:.0f}" if sold is not None else "⏳ --"
-        lines.append(f"{PRODUCT_EMOJIS[i]} *{prod:<12}* {alloc:.0f} → {status}")
+        lines.append(f"{get_product_emoji(prod)} *{prod:<12}* {alloc:.0f} → {status}")
 
     send_text(sender,
         f"{icon} *{market_id} | {day.upper()}*\n"
@@ -147,7 +151,7 @@ def send_market_review(sender: str, market_id: str):
         f"📦 Allocated : *{total_alloc:.0f}*\n"
         f"💰 Sold      : *{total_sold:.0f}*\n"
         f"📊 Sell-thru : *{sell_thru:.1f}%*\n"
-        f"✏️  Entries  : *{filled}/{len(PRODUCTS)}*"
+        f"✏️  Entries  : *{filled}/{len(allocs)}*"
     )
     send_buttons(sender, f"━━━━━━━━━━━━━━━━━━━━\nActions for *{market_id}*:",
         [
@@ -176,13 +180,14 @@ def send_sales_summary(sender: str):
 
 def launch_product_summary(sender: str):
     SESSIONS[sender] = {"mode": "mgr_product_select"}
+    products = get_products()
     rows = [
         {
             "id":          f"mgr_product_{i}",
-            "title":       f"{PRODUCT_EMOJIS[i]} {PRODUCTS[i]}",
+            "title":       f"{get_product_emoji(products[i])} {products[i]}",
             "description": "Tap to see allocated vs sold across all markets",
         }
-        for i in range(len(PRODUCTS))
+        for i in range(len(products))
     ]
     send_list(sender,
         "🔍 *PRODUCT-WISE SUMMARY*\n━━━━━━━━━━━━━━━━━━━━\nSelect a product:",
@@ -192,21 +197,27 @@ def launch_product_summary(sender: str):
 
 def send_product_summary(sender: str, product_idx: int):
     """ONE sheet read for all markets of one product."""
-    product = PRODUCTS[product_idx]
-    emoji   = PRODUCT_EMOJIS[product_idx]
-
     try:
-        all_data = get_all_sheet_data()
+        all_data   = get_all_sheet_data()
+        market_map = build_market_map(all_data)
+        products   = get_products(all_data)
     except Exception as exc:
         send_text(sender, f"❌ Error reading sheet: {exc}")
         return
 
+    if not (0 <= product_idx < len(products)):
+        send_text(sender, "⚠️ Something went wrong. Send *hi* to restart.")
+        return
+
+    product = products[product_idx]
+    emoji   = get_product_emoji(product)
+
     total_alloc = total_sold = 0.0
     market_lines = []
 
-    for mid in MARKETS:
-        allocs    = get_market_allocations(mid, all_data)
-        sold_data = get_sold_data(mid, all_data)
+    for mid in market_map:
+        allocs    = get_market_allocations(mid, all_data, market_map, products)
+        sold_data = get_sold_data(mid, all_data, market_map, products)
         alloc     = allocs.get(product, 0)
         sold      = sold_data.get(product)
         total_alloc += alloc
@@ -246,6 +257,7 @@ def start_market_edit(sender: str, market_id: str):
         all_data  = get_all_sheet_data()
         allocs    = get_market_allocations(market_id, all_data)
         sold_data = get_sold_data(market_id, all_data)
+        products  = get_products(all_data)
     except Exception as exc:
         send_text(sender, f"❌ Error reading sheet: {exc}")
         return
@@ -259,11 +271,11 @@ def start_market_edit(sender: str, market_id: str):
     rows = [
         {
             "id":          f"mgr_product_edit_{i}",
-            "title":       f"{PRODUCT_EMOJIS[i]} {PRODUCTS[i]}",
-            "description": f"Current: {sold_data.get(PRODUCTS[i]):.0f} boxes"
-                           if sold_data.get(PRODUCTS[i]) is not None else "Current: Not entered",
+            "title":       f"{get_product_emoji(products[i])} {products[i]}",
+            "description": f"Current: {sold_data.get(products[i]):.0f} boxes"
+                           if sold_data.get(products[i]) is not None else "Current: Not entered",
         }
-        for i in range(len(PRODUCTS))
+        for i in range(len(products))
     ]
     send_list(sender,
         f"✏️ *Edit Market {market_id}*\n━━━━━━━━━━━━━━━━━━━━\nSelect a product:",
@@ -272,10 +284,11 @@ def start_market_edit(sender: str, market_id: str):
 
 
 def ask_edit_product(sender: str, session: dict, product_idx: int):
-    product  = PRODUCTS[product_idx]
+    products = get_products()
+    product  = products[product_idx]
     alloc    = session["allocations"].get(product, 0)
     existing = session["sold_data"].get(product)
-    emoji    = PRODUCT_EMOJIS[product_idx]
+    emoji    = get_product_emoji(product)
     mid      = session["edit_market_id"]
 
     session["edit_product_idx"] = product_idx
@@ -302,10 +315,11 @@ def handle_mgr_edit_input(sender: str, text: str, session: dict):
         send_market_review(sender, session.get("edit_market_id", ""))
         return
 
-    idx     = session.get("edit_product_idx", 0)
-    product = PRODUCTS[idx]
-    alloc   = session["allocations"].get(product, 0)
-    mid     = session["edit_market_id"]
+    idx      = session.get("edit_product_idx", 0)
+    products = get_products()
+    product  = products[idx]
+    alloc    = session["allocations"].get(product, 0)
+    mid      = session["edit_market_id"]
 
     try:
         sold = float(text.strip())
@@ -349,11 +363,12 @@ def handle_mgr_edit_overwrite_text(sender, text, session):
 
 
 def do_mgr_edit_overwrite(sender, session):
-    idx  = session.get("pending_idx", 0)
-    sold = session.get("pending_sold", 0)
+    idx      = session.get("pending_idx", 0)
+    sold     = session.get("pending_sold", 0)
+    products = get_products()
     session.update({"mode": "mgr_market_edit", "edit_product_idx": idx})
     SESSIONS[sender] = session
-    _do_mgr_write(sender, session, idx, PRODUCTS[idx], sold, session["edit_market_id"])
+    _do_mgr_write(sender, session, idx, products[idx], sold, session["edit_market_id"])
 
 
 def cancel_mgr_edit_overwrite(sender, session):
@@ -377,100 +392,29 @@ def _do_mgr_write(sender, session, idx, product, sold, market_id):
 
 def notify_all_complete(sender: str):
     try:
-        all_data = get_all_sheet_data()
-        totals   = compute_week_totals(all_data)
+        all_data   = get_all_sheet_data()
+        totals     = compute_week_totals(all_data)
+        market_map = build_market_map(all_data)
     except Exception:
-        totals = {"total_alloc": 0, "total_sold": 0}
+        totals, market_map = {"total_alloc": 0, "total_sold": 0}, {}
 
     ta  = totals["total_alloc"]
     ts  = totals["total_sold"]
     pct = (ts / ta * 100) if ta > 0 else 0
+    total_markets = len(market_map)
 
     send_text(sender,
         "🏁 *All Markets Completed!*\n━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ 12/12 Markets Complete\n\n"
+        f"✅ {total_markets}/{total_markets} Markets Complete\n\n"
         f"📦 Allocated : *{ta:,.0f}*\n"
         f"💰 Sold      : *{ts:,.0f}*\n"
         f"📊 Sell-thru : *{pct:.1f}%*\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "Type *close week* or tap below:"
+        "Great job team! 🎉"
     )
     send_buttons(sender, "━━━━━━━━━━━━━━━━━━━━",
-        [{"id": "mgr_close_week", "title": "🔄  Close Week"}]
+        [{"id": "mgr_dashboard", "title": "📊  Overview"}]
     )
-
-
-# ── M-9: Close Week ────────────────────────────────────────────────────────
-
-def handle_close_week_request(sender: str):
-    if not is_manager(sender):
-        send_text(sender, "🔒 Only the manager can close the week.")
-        return
-
-    try:
-        complete = all_markets_complete()
-    except Exception:
-        complete = False
-
-    msg = (
-        "🔐 *Close Week Confirmation*\n━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ All 12 markets complete!\n\n"
-        if complete else
-        "⚠️ *Warning: Incomplete Markets*\n━━━━━━━━━━━━━━━━━━━━\n"
-        "Some markets still have missing data.\n\n"
-    )
-    send_buttons(sender,
-        msg +
-        "This will:\n"
-        "• Move Current → Previous Week\n"
-        "• Archive Previous → History\n"
-        "• Reset Current Week\n"
-        "━━━━━━━━━━━━━━━━━━━━\nConfirm?",
-        [
-            {"id": "close_confirm_yes", "title": "✅  Confirm Close"},
-            {"id": "close_confirm_no",  "title": "❌  Cancel"},
-        ]
-    )
-    SESSIONS[sender] = {"mode": "close_confirm"}
-
-
-def handle_close_confirm_text(sender: str, text: str):
-    if text in ("yes", "y", "confirm", "close"):
-        do_close_week(sender)
-    elif text in ("no", "n", "cancel"):
-        SESSIONS.pop(sender, None)
-        send_text(sender, "✅ Week close cancelled.")
-        send_manager_menu(sender)
-    else:
-        send_buttons(sender, "Confirm week close?",
-            [{"id": "close_confirm_yes", "title": "✅  Confirm"},
-             {"id": "close_confirm_no",  "title": "❌  Cancel"}]
-        )
-
-
-def do_close_week(sender: str):
-    if not is_manager(sender):
-        send_text(sender, "🔒 Access denied.")
-        return
-
-    SESSIONS.pop(sender, None)
-    send_text(sender,
-        "🔄 *Processing…*\n━━━━━━━━━━━━━━━━━━━━\n"
-        "Archiving data… Updating history… Preparing new week… ⏳"
-    )
-    try:
-        rotate_sheets()
-        send_text(sender,
-            "✅ *Week Closed Successfully!*\n━━━━━━━━━━━━━━━━━━━━\n"
-            "📊 Current → Previous Week\n"
-            "🗂️  Previous → History\n"
-            "📋 New Week → Ready\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "Workers can begin new week data entry."
-        )
-        send_manager_menu(sender)
-    except Exception as exc:
-        send_text(sender, f"❌ Week close failed: {exc}\nCheck Google Sheet manually.")
 
 
 # ── Backward compat alias ──────────────────────────────────────────────────
