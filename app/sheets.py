@@ -1,7 +1,7 @@
+import re
 import time
 import json
 import os
-import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 from config import SHEET_ID, CREDS_FILE
@@ -13,51 +13,61 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-MARKETS = {
-    "M1":  "Monday",    "M2":  "Monday",    "M3":  "Monday",    "M4":  "Monday",
-    "M5":  "Wednesday", "M6":  "Wednesday", "M7":  "Wednesday", "M8":  "Wednesday",
-    "M9":  "Friday",    "M10": "Friday",    "M11": "Friday",    "M12": "Friday",
+PRODUCT_EMOJI_MAP = {
+    "apple":        "🍎",
+    "banana":       "🍌",
+    "tomato":       "🍅",
+    "potato":       "🥔",
+    "onion":        "🧅",
+    "beans":        "🫘",
+    "chilli":       "🌶️",
+    "chili":        "🌶️",
+    "brinjal":      "🍆",
+    "eggplant":     "🍆",
+    "carrot":       "🥕",
+    "pine apple":   "🍍",
+    "pineapple":    "🍍",
+    "guava":        "🍈",
+    "mango":        "🥭",
+    "grapes":       "🍇",
+    "orange":       "🍊",
+    "lemon":        "🍋",
+    "lime":         "🍋",
+    "watermelon":   "🍉",
+    "papaya":       "🫐",
+    "cucumber":     "🥒",
+    "cabbage":      "🥬",
+    "cauliflower":  "🥦",
+    "broccoli":     "🥦",
+    "ginger":       "🫚",
+    "garlic":       "🧄",
+    "corn":         "🌽",
+    "peas":         "🫛",
+    "mushroom":     "🍄",
+    "pumpkin":      "🎃",
+    "sweet potato": "🍠",
+    "beetroot":     "🍠",
+    "coconut":      "🥥",
+    "peach":        "🍑",
+    "pear":         "🍐",
+    "kiwi":         "🥝",
+    "strawberry":   "🍓",
+    "cherry":       "🍒",
+    "avocado":      "🥑",
 }
+DEFAULT_EMOJI = "📦"
 
-PRODUCTS = [
-    "Apple", "Banana", "Tomato", "Potato", "Onion",
-    "Beans", "Chilli", "Brinjal", "Carrot", "Pine Apple",
-]
 
-PRODUCT_EMOJIS = ["🍎", "🍌", "🍅", "🥔", "🧅", "🫘", "🌶️", "🍆", "🥕", "🍍"]
+def get_product_emoji(product_name: str) -> str:
+    """Return an emoji for a product name (case-insensitive), or a default box emoji."""
+    return PRODUCT_EMOJI_MAP.get(str(product_name).strip().lower(), DEFAULT_EMOJI)
+
 
 CALC_SHEET_NAME    = "Calculation"
-HISTORY_SHEET_NAME = "History"
 DETAILS_SHEET_NAME = "Details"
 
-PREV_DATA_START_ROW = 6
-CURR_DATA_START_ROW = 28
-NUM_PRODUCTS        = 10
-NUM_MARKETS         = 12
-
-
-FINAL_ALLOC_COL = {
-    "M1": 5,
-    "M2": 10,
-    "M3": 15,
-    "M4": 20,
-    "M5": 25,
-    "M6": 30,
-    "M7": 35,
-    "M8": 40,
-    "M9": 45,
-    "M10": 50,
-    "M11": 55,
-    "M12": 60,
-}
-
-# Correct values (0-based index)
-
-TOTAL_ALLOC_COL  = 63   # BL
-TOTAL_SALES_COL  = 64   # BM
-TOTAL_UNSOLD_COL = 65   # BN
-TOTAL_SALESPCT   = 66   # BO
-TOTAL_UNSOLDPCT  = 67   # BP
+# Column (0-based) in the Calculation sheet that holds the product name.
+PRODUCT_COL = 2  # column C
 
 DETAILS_WORKER_START_ROW = 5
 DETAILS_COL_W_NO         = 6
@@ -81,12 +91,9 @@ WORKER_CACHE_TTL = 60
 def _client():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
     if creds_json:
-        # Koyeb cloud-ல run
-        import json
         creds_dict = json.loads(creds_json)
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     else:
-        # உங்கள் laptop-ல locally run
         creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
     return gspread.authorize(creds)
 
@@ -140,35 +147,191 @@ def _safe_float(val) -> float | None:
         return None
 
 
-# ── Read: Calculation sheet ───────────────────────────────────────────────
+def _forward_fill(row: list) -> list:
+    """Fill blank cells with the last non-blank value seen to the left.
+    Needed because merged cells (like the Monday/Wednesday/Friday day
+    header) only carry their value in the first cell of the merge."""
+    filled = []
+    last = ""
+    for v in row:
+        v = str(v).strip()
+        if v:
+            last = v
+        filled.append(last)
+    return filled
 
-def get_markets_by_day(day: str) -> list:
-    return [{"id": m, "day": d} for m, d in MARKETS.items()
-            if d.lower() == day.lower()]
+
+_MARKET_ID_RE = re.compile(r"^M\d+$")
 
 
-def get_market_allocations(market_id: str, all_data: list = None) -> dict:
+def _find_market_header_row(all_data: list):
+    """Scan the sheet and find the row that lists the market IDs (M1, M2, ...).
+    Returns the 0-based row index, or None if not found."""
+    for idx, row in enumerate(all_data):
+        matches = sum(1 for cell in row if _MARKET_ID_RE.match(str(cell).strip()))
+        if matches >= 2:
+            return idx
+    return None
+
+
+# ── Read: Calculation sheet layout (fully dynamic) ─────────────────────────
+
+def build_market_map(all_data: list = None) -> dict:
+    """Dynamically discover every market on the Calculation sheet: its column
+    position, its Final Allocated / Sold Boxes columns, and which day it
+    belongs to (Monday/Wednesday/Friday/etc — read straight from the sheet,
+    not hardcoded).
+
+    Returns: { "M1": {"start_col": 3, "final_alloc_col": 5, "sold_col": 6, "day": "Monday"}, ... }
+    (columns are 0-based, matching gspread's get_all_values() list format)
+    """
     if all_data is None:
         all_data = get_all_sheet_data()
-    col = FINAL_ALLOC_COL[market_id]
+
+    market_row_idx = _find_market_header_row(all_data)
+    if market_row_idx is None:
+        return {}
+
+    market_row = all_data[market_row_idx]
+    day_row = all_data[market_row_idx - 1] if market_row_idx - 1 >= 0 else []
+    
+    """Only forward-fill starting from the first market's column. Otherwise a
+    row label like "Day" sitting in an earlier column (e.g. column C) can
+    bleed into market columns that genuinely don't have their own day text
+    yet (e.g. if a day's merged header cell is misaligned in the sheet)."""
+    
+    market_cols = [c for c, v in enumerate(market_row) if _MARKET_ID_RE.match(str(v).strip())]
+    first_market_col = min(market_cols) if market_cols else 0
+    day_row_filled = ([""] * first_market_col
+                       + _forward_fill(day_row[first_market_col:]))
+
+    markets = {}
+    for col_idx, val in enumerate(market_row):
+        val = str(val).strip()
+        if _MARKET_ID_RE.match(val):
+            day = day_row_filled[col_idx] if col_idx < len(day_row_filled) else ""
+            markets[val] = {
+                "start_col":       col_idx,
+                "final_alloc_col": col_idx + 2,
+                "sold_col":        col_idx + 3,
+                "day":             day,
+            }
+    return markets
+
+
+def get_data_start_row(all_data: list = None):
+    """0-based row index where product rows begin (right under the sub-header
+    row that has Auto Allocated / Adjustment / Final Allocated / ...)."""
+    if all_data is None:
+        all_data = get_all_sheet_data()
+    market_row_idx = _find_market_header_row(all_data)
+    if market_row_idx is None:
+        return None
+    return market_row_idx + 2  # +1 = sub-header row, +2 = first product row
+
+
+def get_products(all_data: list = None) -> list:
+    """Dynamically read the product names straight from the sheet's Product
+    column, starting right after the header rows and stopping at the first
+    blank row. No more hardcoded PRODUCTS list."""
+    if all_data is None:
+        all_data = get_all_sheet_data()
+    start_row = get_data_start_row(all_data)
+    if start_row is None:
+        return []
+
+    products = []
+    row_idx = start_row
+    while row_idx < len(all_data):
+        row = all_data[row_idx]
+        name = row[PRODUCT_COL].strip() if PRODUCT_COL < len(row) else ""
+        if not name:
+            break
+        products.append(name)
+        row_idx += 1
+    return products
+
+
+def get_days_in_order(market_map: dict = None) -> list:
+    """Distinct market days in left-to-right sheet order (e.g. Monday, Wednesday, Friday)."""
+    if market_map is None:
+        market_map = build_market_map()
+    ordered = sorted(market_map.values(), key=lambda m: m["start_col"])
+    days = []
+    for m in ordered:
+        if m["day"] and m["day"] not in days:
+            days.append(m["day"])
+    return days
+
+
+def get_markets_by_day(day: str, market_map: dict = None) -> list:
+    if market_map is None:
+        market_map = build_market_map()
+    return [{"id": mid, "day": info["day"]} for mid, info in market_map.items()
+            if info["day"].lower() == day.lower()]
+
+
+def get_next_day_markets(market_id: str, market_map: dict = None) -> list:
+    """Market IDs belonging to whichever market day comes right after market_id's day."""
+    if market_map is None:
+        market_map = build_market_map()
+    days_order = get_days_in_order(market_map)
+    day = market_map.get(market_id, {}).get("day", "")
+    if day not in days_order:
+        return []
+    idx = days_order.index(day)
+    if idx + 1 >= len(days_order):
+        return []
+    next_day = days_order[idx + 1]
+    return [mid for mid, info in market_map.items() if info["day"] == next_day]
+
+
+# ── Read: Calculation sheet values ──────────────────────────────────────────
+
+def get_market_allocations(market_id: str, all_data: list = None,
+                            market_map: dict = None, products: list = None) -> dict:
+    if all_data is None:
+        all_data = get_all_sheet_data()
+    if market_map is None:
+        market_map = build_market_map(all_data)
+    if products is None:
+        products = get_products(all_data)
+
+    info = market_map.get(market_id)
+    if not info:
+        return {}
+    col = info["final_alloc_col"]
+    start_row = get_data_start_row(all_data)
+
     result = {}
-    for i, product in enumerate(PRODUCTS):
-        row_idx = CURR_DATA_START_ROW + i
+    for i, product in enumerate(products):
+        row_idx = start_row + i
         row = all_data[row_idx] if row_idx < len(all_data) else []
         val = row[col] if col < len(row) else ""
         result[product] = _safe_float(val) or 0.0
     return result
 
 
-def get_sold_data(market_id: str, all_data: list = None) -> dict:
+def get_sold_data(market_id: str, all_data: list = None,
+                   market_map: dict = None, products: list = None) -> dict:
     if all_data is None:
         all_data = get_all_sheet_data()
-    sold_col = FINAL_ALLOC_COL[market_id] + 1
+    if market_map is None:
+        market_map = build_market_map(all_data)
+    if products is None:
+        products = get_products(all_data)
+
+    info = market_map.get(market_id)
+    if not info:
+        return {}
+    col = info["sold_col"]
+    start_row = get_data_start_row(all_data)
+
     result = {}
-    for i, product in enumerate(PRODUCTS):
-        row_idx = CURR_DATA_START_ROW + i
+    for i, product in enumerate(products):
+        row_idx = start_row + i
         row = all_data[row_idx] if row_idx < len(all_data) else []
-        val = row[sold_col] if sold_col < len(row) else ""
+        val = row[col] if col < len(row) else ""
         result[product] = _safe_float(val)
     return result
 
@@ -176,11 +339,15 @@ def get_sold_data(market_id: str, all_data: list = None) -> dict:
 def build_market_status_map(all_data: list = None) -> dict:
     if all_data is None:
         all_data = get_all_sheet_data()
+    market_map = build_market_map(all_data)
+    products   = get_products(all_data)
+    num_products = len(products)
+
     status_map = {}
-    for market_id in MARKETS:
-        sold = get_sold_data(market_id, all_data)
+    for market_id in market_map:
+        sold = get_sold_data(market_id, all_data, market_map, products)
         filled = sum(1 for v in sold.values() if v is not None)
-        if filled == NUM_PRODUCTS:
+        if num_products and filled == num_products:
             status_map[market_id] = "complete"
         elif filled > 0:
             status_map[market_id] = "in_progress"
@@ -199,10 +366,13 @@ def count_filled(market_id: str, all_data: list = None) -> int:
 def compute_week_totals(all_data: list = None) -> dict:
     if all_data is None:
         all_data = get_all_sheet_data()
+    market_map = build_market_map(all_data)
+    products   = get_products(all_data)
+
     total_alloc = total_sold = 0.0
-    for market_id in MARKETS:
-        allocs    = get_market_allocations(market_id, all_data)
-        sold_data = get_sold_data(market_id, all_data)
+    for market_id in market_map:
+        allocs    = get_market_allocations(market_id, all_data, market_map, products)
+        sold_data = get_sold_data(market_id, all_data, market_map, products)
         total_alloc += sum(allocs.values())
         total_sold  += sum(v for v in sold_data.values() if v is not None)
     return {"total_alloc": total_alloc, "total_sold": total_sold}
@@ -211,8 +381,10 @@ def compute_week_totals(all_data: list = None) -> dict:
 def all_markets_complete(all_data: list = None) -> bool:
     if all_data is None:
         all_data = get_all_sheet_data(force=True)
-    for market_id in MARKETS:
-        sold = get_sold_data(market_id, all_data)
+    market_map = build_market_map(all_data)
+    products   = get_products(all_data)
+    for market_id in market_map:
+        sold = get_sold_data(market_id, all_data, market_map, products)
         if any(v is None for v in sold.values()):
             return False
     return True
@@ -222,22 +394,20 @@ def get_reallocation_view(market_id: str, all_data: list = None) -> list:
     if all_data is None:
         all_data = get_all_sheet_data(force=True)
 
-    day = MARKETS.get(market_id, "")
-    next_day_markets = {
-        "Monday":    ["M5", "M6", "M7", "M8"],
-        "Wednesday": ["M9", "M10", "M11", "M12"],
-        "Friday":    [],
-    }.get(day, [])
+    market_map = build_market_map(all_data)
+    products   = get_products(all_data)
 
-    allocs    = get_market_allocations(market_id, all_data)
-    sold_data = get_sold_data(market_id, all_data)
+    next_day_markets = get_next_day_markets(market_id, market_map)
+
+    allocs    = get_market_allocations(market_id, all_data, market_map, products)
+    sold_data = get_sold_data(market_id, all_data, market_map, products)
 
     next_day_allocs = {}
     for mid in next_day_markets:
-        next_day_allocs[mid] = get_market_allocations(mid, all_data)
+        next_day_allocs[mid] = get_market_allocations(mid, all_data, market_map, products)
 
     result = []
-    for i, product in enumerate(PRODUCTS):
+    for product in products:
         allocated = allocs.get(product, 0.0)
         sold      = sold_data.get(product) or 0.0
         remain    = max(0.0, allocated - sold)
@@ -250,7 +420,7 @@ def get_reallocation_view(market_id: str, all_data: list = None) -> list:
 
         result.append({
             "product":         product,
-            "emoji":           PRODUCT_EMOJIS[i],
+            "emoji":           get_product_emoji(product),
             "allocated":       allocated,
             "sold":            sold,
             "remain":          remain,
@@ -346,127 +516,20 @@ def get_workers_by_day(day: str) -> list:
     return result
 
 
-
 # ── Write ─────────────────────────────────────────────────────────────────
 
 def write_sold_box(market_id: str, product_index: int, sold_value: float):
     ws = _calc_sheet()
+    all_data = get_all_sheet_data()
 
-    row_1 = CURR_DATA_START_ROW + product_index + 1
+    market_map = build_market_map(all_data)
+    info = market_map.get(market_id)
+    if not info:
+        raise ValueError(f"Unknown market_id: {market_id}")
 
-    # Final Allocated column + 2 = Sold Boxes column
-    col_1 = FINAL_ALLOC_COL[market_id] + 2
+    start_row = get_data_start_row(all_data)
+    row_1 = start_row + product_index + 1          # +1 to convert 0-based → 1-based for gspread
+    col_1 = info["sold_col"] + 1                    # +1 to convert 0-based → 1-based for gspread
 
     ws.update_cell(row_1, col_1, sold_value)
     invalidate_cache()
-
-# ── Sheet rotation ────────────────────────────────────────────────────────
-
-def rotate_sheets():
-    spreadsheet = _spreadsheet()
-    ws          = spreadsheet.worksheet(CALC_SHEET_NAME)
-    all_values  = ws.get_all_values()
-
-    _archive_to_history(spreadsheet, all_values)
-    _copy_current_to_previous(ws, all_values)
-    _reset_current_week(ws)
-    invalidate_cache()
-
-
-def _archive_to_history(spreadsheet, all_values):
-    try:
-        hist_ws = spreadsheet.worksheet(HISTORY_SHEET_NAME)
-    except gspread.WorksheetNotFound:
-        hist_ws = spreadsheet.add_worksheet(HISTORY_SHEET_NAME, rows=1000, cols=50)
-
-    today      = datetime.date.today()
-    week_end   = today - datetime.timedelta(days=today.weekday() + 1)
-    week_start = week_end - datetime.timedelta(days=6)
-    month_name = week_start.strftime("%B %Y")
-    date_range = (f"{week_start.strftime('%a %d %b')}"
-                  f" – {week_end.strftime('%a %d %b %Y')}")
-
-    existing_data = hist_ws.get_all_values()
-    week_num      = sum(1 for row in existing_data if row and "Week" in str(row[0])) + 1
-    week_header   = f"Week {week_num}  |  {month_name}  |  {date_range}"
-
-    col_header = ["Product"]
-    for mid in MARKETS:
-        col_header += [f"{mid} Allocated", f"{mid} Sold", f"{mid} Market%"]
-    col_header += ["Total Allocated", "Total Sales",
-                   "Total Unsold", "Total Sales%", "Total Unsales%"]
-
-    data_rows = []
-    for i, product in enumerate(PRODUCTS):
-        curr_row = all_values[CURR_DATA_START_ROW + i]
-        row_data = [product]
-        for base_col in FINAL_ALLOC_COL.values():
-            for offset in range(3):
-                try:
-                    raw = curr_row[base_col + offset]
-                    val = _safe_float(raw)
-                    row_data.append(val if val is not None else "")
-                except IndexError:
-                    row_data.append("")
-        for tc in [TOTAL_ALLOC_COL, TOTAL_SALES_COL,
-                   TOTAL_UNSOLD_COL, TOTAL_SALESPCT, TOTAL_UNSOLDPCT]:
-            try:
-                raw = curr_row[tc]
-                val = _safe_float(raw)
-                row_data.append(val if val is not None else "")
-            except IndexError:
-                row_data.append("")
-        data_rows.append(row_data)
-
-    next_row = len(existing_data) + 1
-    if existing_data and any(existing_data[-1]):
-        next_row += 1
-
-    rows_to_write = [[week_header], col_header] + data_rows + [[""]]
-    hist_ws.update(f"A{next_row}", rows_to_write, value_input_option="USER_ENTERED")
-
-    try:
-        hist_ws.format(f"A{next_row}", {
-            "textFormat":      {"bold": True, "fontSize": 11},
-            "backgroundColor": {"red": 0.2, "green": 0.6, "blue": 0.2},
-        })
-    except Exception:
-        pass
-
-
-def _copy_current_to_previous(ws, all_values):
-    updates = []
-    for i in range(NUM_PRODUCTS):
-        curr_row   = all_values[CURR_DATA_START_ROW + i]
-        prev_row_1 = PREV_DATA_START_ROW + i + 1
-
-        try:
-            total_alloc = _safe_float(curr_row[TOTAL_ALLOC_COL]) or 0.0
-        except IndexError:
-            total_alloc = 0.0
-
-        for base_col in FINAL_ALLOC_COL.values():
-            alloc_val = _safe_float(
-                curr_row[base_col] if base_col < len(curr_row) else "") or 0.0
-            updates.append(gspread.Cell(prev_row_1, base_col + 1, alloc_val))
-
-            sold_val = _safe_float(
-                curr_row[base_col + 1] if (base_col + 1) < len(curr_row) else "") or 0.0
-            updates.append(gspread.Cell(prev_row_1, base_col + 2, sold_val))
-
-            market_pct = (sold_val / total_alloc) if total_alloc > 0 else 0.0
-            updates.append(gspread.Cell(prev_row_1, base_col + 3, market_pct))
-
-    if updates:
-        ws.update_cells(updates, value_input_option="RAW")
-
-
-def _reset_current_week(ws):
-    clears = []
-    for i in range(NUM_PRODUCTS):
-        row_1 = CURR_DATA_START_ROW + i + 1
-        for base_col in FINAL_ALLOC_COL.values():
-            clears.append(gspread.Cell(row_1, base_col + 2, ""))
-        clears.append(gspread.Cell(row_1, TOTAL_ALLOC_COL + 1, ""))
-    if clears:
-        ws.update_cells(clears, value_input_option="RAW")
