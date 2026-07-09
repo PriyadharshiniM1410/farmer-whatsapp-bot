@@ -1,4 +1,5 @@
 .env
 credentials.json
+sheet_data_cache.json
 __pycache__/
 *.pyc
