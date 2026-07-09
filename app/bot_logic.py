@@ -9,7 +9,7 @@ Imports all business logic from:
 
 import re
 from app.shared import SESSIONS, is_manager
-from app.sheets import PRODUCTS
+from app.sheets import get_products, get_product_emoji
 from app.whatsapp import send_text
 import app.worker as worker
 import app.manager as manager
@@ -24,29 +24,38 @@ def handle_message(sender: str, text: str):
         mode    = session.get("mode", "idle")
         is_mgr  = is_manager(sender)
 
-        if t_lower in ("close week", "closeweek", "close_week"):
-            manager.handle_close_week_request(sender)
-            return
-
         if mode == "waiting_for_sold_qty":
             market_id = session.get("current_market")
             prod_idx  = session.get("current_prod_idx")
 
-            item   = PRODUCTS[prod_idx]
-            p_name = item.get("name") if isinstance(item, dict) else str(item)
+            products = get_products()
+            if not (0 <= prod_idx < len(products)):
+                send_text(sender, "⚠️ Something went wrong. Send *hi* to restart.")
+                session["mode"] = "idle"
+                return
+            p_name = products[prod_idx]
 
             if t.isdigit():
                 sold_val = int(t)
+
+                all_data  = worker.get_all_sheet_data()
+                allocs    = worker.get_market_allocations(market_id, all_data)
+                allocated = allocs.get(p_name, 0)
+
+                if sold_val > allocated:
+                    send_text(sender,
+                        f"⚠️ *{p_name}* — you entered *{sold_val}*, but only "
+                        f"*{allocated:.0f} boxes* were allocated to {market_id}.\n"
+                        f"Please enter a number between 0 and {allocated:.0f}."
+                    )
+                    return
+
                 worker.update_sheet_sold_qty(market_id, p_name, sold_val)
                 send_text(sender, f"✅ *{p_name}* → *{sold_val} boxes* saved successfully!")
                 session["mode"] = "idle"
                 worker.send_product_manifest_dashboard(sender, market_id)
             else:
                 send_text(sender, "⚠️ Invalid input. Please reply with a valid number only.")
-            return
-
-        if mode == "close_confirm":
-            manager.handle_close_confirm_text(sender, t_lower)
             return
 
         if is_mgr and mode == "mgr_market_edit":
@@ -110,9 +119,12 @@ def handle_interactive(sender: str, button_id: str):
             market_id = parts[1]
             prod_idx  = int(parts[2])
 
-            item    = PRODUCTS[prod_idx]
-            p_name  = item.get("name") if isinstance(item, dict) else str(item)
-            p_emoji = item.get("emoji", "📦") if isinstance(item, dict) else "📦"
+            products = get_products()
+            if not (0 <= prod_idx < len(products)):
+                send_text(sender, "⚠️ Something went wrong. Send *hi* to restart.")
+                return
+            p_name  = products[prod_idx]
+            p_emoji = get_product_emoji(p_name)
 
             all_data    = worker.get_all_sheet_data()
             allocs      = worker.get_market_allocations(market_id, all_data)
@@ -150,8 +162,6 @@ def handle_interactive(sender: str, button_id: str):
                 manager.send_sales_summary(sender)
             elif button_id == "mgr_product_summary":
                 manager.launch_product_summary(sender)
-            elif button_id == "mgr_close_week":
-                manager.handle_close_week_request(sender)
             elif button_id.startswith("mgr_view_market_"):
                 mid = button_id.replace("mgr_view_market_", "").upper()
                 manager.send_market_review(sender, mid)
@@ -164,12 +174,6 @@ def handle_interactive(sender: str, button_id: str):
             elif button_id.startswith("mgr_product_"):
                 idx = int(button_id.replace("mgr_product_", ""))
                 manager.send_product_summary(sender, idx)
-            elif button_id == "close_confirm_yes":
-                manager.do_close_week(sender)
-            elif button_id == "close_confirm_no":
-                SESSIONS.pop(sender, None)
-                send_text(sender, "✅ Week close cancelled.")
-                manager.send_manager_menu(sender)
             elif button_id == "mgr_edit_overwrite_yes":
                 manager.do_mgr_edit_overwrite(sender, session)
             elif button_id == "mgr_edit_overwrite_no":
@@ -186,11 +190,6 @@ def handle_interactive(sender: str, button_id: str):
             worker.complete_market(sender, session)
         elif button_id.startswith("submit_lock_"):
             worker.complete_market(sender, session)
-        elif button_id == "close_confirm_yes":
-            manager.do_close_week(sender)
-        elif button_id == "close_confirm_no":
-            SESSIONS.pop(sender, None)
-            send_text(sender, "✅ Week close cancelled.")
         else:
             worker.route_on_greeting(sender, session)
 
